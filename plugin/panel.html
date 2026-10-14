@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>会话状态</title>
+<style>
+:root{color-scheme:light dark;--fallback-bg:#fff;--fallback-text:#202123;--fallback-muted:#50535b}
+@media(prefers-color-scheme:dark){:root{--fallback-bg:#212121;--fallback-text:#ececec;--fallback-muted:#c4c4c4}}
+:root[data-theme=dark]{--fallback-bg:#212121;--fallback-text:#ececec;--fallback-muted:#c4c4c4}
+:root[data-theme=light]{--fallback-bg:#fff;--fallback-text:#202123;--fallback-muted:#50535b}
+*{box-sizing:border-box}html,body{margin:0;min-width:0}
+body{font:14px/1.6 var(--font-sans,"Segoe UI",system-ui,sans-serif);color:var(--color-text-primary,var(--fallback-text));background:var(--color-background-primary,var(--fallback-bg))}
+dl{display:flex;flex-wrap:wrap;gap:12px 24px;margin:0;padding:16px;align-items:baseline}
+.metric{flex:0 1 auto;max-width:100%;min-width:0}dt{font-size:12px;color:var(--color-text-secondary,var(--fallback-muted))}
+dd{margin:2px 0 0;font-size:15px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.stale::after{content:" · 未更新";font-size:12px;color:var(--color-text-secondary,var(--fallback-muted))}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+@media(max-width:360px){dl{gap:12px 16px;padding:12px}.metric{flex-basis:calc(50% - 8px)}}
+@media(prefers-reduced-motion:reduce){*{animation:none;transition:none}}
+</style></head><body>
+<dl aria-label="当前会话状态">
+<div class="metric"><dt>会话 Token</dt><dd id="tokens">--</dd></div>
+<div class="metric"><dt>缓存命中率</dt><dd id="cache">--</dd></div>
+<div class="metric"><dt>5 小时剩余</dt><dd id="remaining">--</dd></div>
+<div class="metric"><dt>重置时间</dt><dd id="reset">--</dd></div>
+<div class="metric"><dt>当前模式</dt><dd id="mode">未知</dd></div>
+</dl><span class="sr-only" role="status" aria-atomic="true" id="announcement"></span>
+<script>
+(() => {
+  const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const pending=new Map(); let nextId=1, sessionId=null, generation=0, data=null;
+  let disposed=false, initialized=false, polling=false, timer=null, requestFailed=false;
+  const parentOrigin=(()=>{try{return new URL(document.referrer).origin}catch{return '*'}})();
+  function send(message){if(window.parent!==window)window.parent.postMessage({jsonrpc:'2.0',...message},parentOrigin)}
+  function rpc(method,params){return new Promise((resolve,reject)=>{
+    if(disposed || window.parent===window){reject(new Error('host-unavailable'));return}
+    const id=nextId++, timeout=setTimeout(()=>{pending.delete(id);reject(new Error('host-timeout'))},5000);
+    pending.set(id,{resolve,reject,timeout});send({id,method,params});
+  })}
+  function theme(context){
+    if(context?.theme==='light'||context?.theme==='dark')document.documentElement.dataset.theme=context.theme;
+    const variables=context?.styles?.variables||{};
+    for(const key of ['--color-text-primary','--color-text-secondary','--color-background-primary','--color-border-primary','--font-sans']){
+      if(typeof variables[key]==='string'&&variables[key].length<256)document.documentElement.style.setProperty(key,variables[key]);
+    }
+  }
+  function render(){
+    const usage=data?.session?.value, quota=data?.quota?.value, mode=data?.mode?.value;
+    const count=Number.isSafeInteger(usage?.totalTokens)&&usage.totalTokens>=0;
+    const cache=Number.isFinite(usage?.cacheHitPercent)&&usage.cacheHitPercent>=0&&usage.cacheHitPercent<=100;
+    const remaining=Number.isFinite(quota?.remainingPercent)&&quota.remainingPercent>=0&&quota.remainingPercent<=100;
+    const reset=Number.isSafeInteger(quota?.resetsAt)&&quota.resetsAt>0?new Date(quota.resetsAt*1000):null;
+    const values={tokens:count?new Intl.NumberFormat().format(usage.totalTokens):'--',cache:cache?usage.cacheHitPercent.toFixed(1)+'%':'--',
+      remaining:remaining?Number(quota.remainingPercent.toFixed(1))+'%':'--',
+      reset:reset&&Number.isFinite(reset.getTime())?new Intl.DateTimeFormat(undefined,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(reset):'--',
+      mode:mode==='Work'||mode==='Codex'?mode:'未知'};
+    for(const [key,value] of Object.entries(values)){
+      const cell=document.getElementById(key);cell.textContent=value;
+      const stale=requestFailed||(key==='tokens'||key==='cache'?data?.session?.stale:key==='mode'?data?.mode?.stale:data?.quota?.stale);
+      cell.classList.toggle('stale',!!stale);
+      const timestamp=data?.quota?.updatedAt;
+      cell.title=key==='mode'?'根据本地会话 originator 确认；缺失时不猜测':
+        key==='remaining'||key==='reset'?'账户共享额度'+(timestamp?'；读取于 '+new Date(timestamp).toLocaleString():''):'当前绑定会话的累计数据';
+    }
+  }
+  function bind(id){
+    const next=typeof id==='string'&&uuid.test(id)?id.toLowerCase():null;
+    if(next===sessionId)return;
+    sessionId=next;generation++;requestFailed=false;
+    data={binding:{sessionId},session:{value:null,stale:false},mode:{value:null,stale:false},quota:data?.quota||{value:null,stale:false}};
+    render();
+  }
+  function accept(result,allowHostRebind=false){
+    const value=result?.structuredContent;
+    if(!value?.binding)return;
+    const id=value.binding.sessionId;
+    if(id!==sessionId){
+      if(sessionId&&!(allowHostRebind&&value.binding.source==='host-thread-metadata'))return;
+      bind(id);
+    }
+    const previous=data?.mode?.value;data=value;requestFailed=false;render();
+    if(previous!==value.mode?.value)document.getElementById('announcement').textContent='当前会话模式：'+(value.mode?.value||'未知');
+  }
+  async function poll(){
+    if(disposed||polling||document.hidden||!sessionId)return;
+    const revision=generation, requestedId=sessionId;polling=true;
+    try{
+      const result=initialized?await rpc('tools/call',{name:'read_session_status',arguments:{session_id:requestedId}}):
+        window.openai?.callTool?await window.openai.callTool('read_session_status',{session_id:requestedId}):null;
+      if(disposed||revision!==generation)return;
+      if(result?.isError||!result?.structuredContent)throw new Error('status-unavailable');
+      accept(result,true);
+    }catch{if(!disposed&&revision===generation){requestFailed=true;render()}}
+    finally{polling=false}
+  }
+  function input(args){bind(args?.session_id);void poll()}
+  function stop(){disposed=true;clearInterval(timer);observer.disconnect();for(const item of pending.values()){clearTimeout(item.timeout);item.reject(new Error('teardown'))}pending.clear()}
+  window.addEventListener('message',(event)=>{
+    if(event.source!==window.parent||disposed)return;
+    const message=event.data;if(message?.jsonrpc!=='2.0')return;
+    if(Object.hasOwn(message,'id')&&!message.method){const item=pending.get(message.id);if(!item)return;pending.delete(message.id);clearTimeout(item.timeout);message.error?item.reject(new Error('host-error')):item.resolve(message.result);return}
+    if(message.method==='ui/notifications/tool-input')input(message.params?.arguments);
+    if(message.method==='ui/notifications/tool-result')accept(message.params);
+    if(message.method==='ui/notifications/tool-cancelled'){bind(null);render()}
+    if(message.method==='ui/notifications/host-context-changed')theme(message.params);
+    if(message.method==='ui/resource-teardown'){send({id:message.id,result:{}});stop()}
+  });
+  window.addEventListener('openai:set_globals',(event)=>{
+    if(disposed)return;const globals=event.detail?.globals||{};theme(globals);
+    if(Object.hasOwn(globals,'toolInput'))input(globals.toolInput);
+    if(Object.hasOwn(globals,'toolOutput'))accept({structuredContent:globals.toolOutput});
+  });
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden)void poll()});
+  window.addEventListener('pagehide',stop,{once:true});
+  let lastHeight=0;
+  const observer=new ResizeObserver(()=>{const height=document.body.scrollHeight;if(height!==lastHeight){lastHeight=height;if(initialized)send({method:'ui/notifications/size-changed',params:{height}})}});
+  observer.observe(document.body);render();
+  if(window.openai){theme(window.openai);input(window.openai.toolInput);accept({structuredContent:window.openai.toolOutput})}
+  if(window.parent!==window)rpc('ui/initialize',{appInfo:{name:'session-status',version:'0.2.0'},appCapabilities:{availableDisplayModes:['inline','pip','fullscreen']},protocolVersion:'2026-01-26'})
+    .then((result)=>{if(disposed)return;initialized=true;theme(result?.hostContext);send({method:'ui/notifications/initialized',params:{}});send({method:'ui/notifications/size-changed',params:{height:document.body.scrollHeight}});void poll()})
+    .catch(()=>{if(!window.openai?.callTool){requestFailed=true;render()}});
+  timer=setInterval(poll,2000);
+})();
+</script></body></html>

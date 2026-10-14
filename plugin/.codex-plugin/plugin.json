@@ -1,0 +1,16 @@
+{
+  "name": "session-status",
+  "version": "0.2.0",
+  "description": "本机会话 Token、缓存命中率、5 小时剩余、重置时间和 Codex/Work 模式。",
+  "mcpServers": "./.mcp.json",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "会话状态",
+    "shortDescription": "五项本机会话状态",
+    "longDescription": "只读本地会话累计用量和官方桌面额度；缺失数据显示未知，连接失败标记未更新。",
+    "developerName": "Local tools",
+    "category": "Productivity",
+    "capabilities": ["Read", "Interactive"],
+    "defaultPrompt": ["显示当前会话的五项状态"]
+  }
+}
