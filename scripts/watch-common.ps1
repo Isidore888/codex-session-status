@@ -186,44 +186,51 @@ function Invoke-StatusTakeover($Identity,$App,$Control) {
     if (-not (Test-StatusIdentity $Identity)) { return @{ok=$false; code='identity-changed'} }
     # Reserve/check a port before requesting any client exit.
     $port=Find-FreePort
-    $code=Request-StatusNormalExit $Identity
-    Write-WatchLog $code
-    if ($code -ne 'shutdown-requested' -and $code -notmatch '^rm-shutdown-') { return @{ok=$false;code=$code} }
-    if (-not (Wait-StatusExit $Identity)) {
-        # Reactivation restores a window if normal shutdown closed it but left the process.
-        Start-StatusClientNormally $App
-        return @{ok=$false; code='normal-exit-failed'}
-    }
-    # Identity disappearance, not an API success code, proves it exited.
-    $ready=$false
-    $diagnostics=$null
-    $launchedPid=0
+    $splash=Start-StatusSplash '正在开启调试连接并重新进入 Codex...'
     try {
-        $App=Resolve-Codex
-        if ($Control.StopRequested) { return @{ok=$false; code='takeover-cancelled'} }
-        $launchedPid=Start-StatusClientWithPort $App $port
-        $deadline=[DateTime]::UtcNow.AddSeconds(60)
-        $diagnoseAt=[DateTime]::UtcNow.AddSeconds(5)
-        do {
-            Start-Sleep -Milliseconds 150
-            $clients=@(Get-StatusClientProcesses $App)
-            if ($clients.Count -gt 1) { return @{ok=$false;code='ambiguous-client'} }
-            foreach ($client in $clients) {
-                $owned=Find-StatusOwnedCdp $client
-                if ($owned -eq $port) {
-                    $diagnostics=Get-StatusLaunchDiagnostics $App $port $client
-                    $ready=$true; return @{ok=$true; code='takeover-ready'; port=$port; identity=$client; app=$App;diagnostics=$diagnostics;launchedPid=$launchedPid}
+        $code=Request-StatusNormalExit $Identity
+        Write-WatchLog $code
+        if ($code -ne 'shutdown-requested' -and $code -notmatch '^rm-shutdown-') { return @{ok=$false;code=$code} }
+        if (-not (Wait-StatusExit $Identity)) {
+            # Reactivation restores a window if normal shutdown closed it but left the process.
+            Start-StatusClientNormally $App
+            return @{ok=$false; code='normal-exit-failed'}
+        }
+        Update-StatusSplash $splash '正在以调试模式重新启动 Codex...'
+        # Identity disappearance, not an API success code, proves it exited.
+        $ready=$false
+        $diagnostics=$null
+        $launchedPid=0
+        try {
+            $App=Resolve-Codex
+            if ($Control.StopRequested) { return @{ok=$false; code='takeover-cancelled'} }
+            $launchedPid=Start-StatusClientWithPort $App $port
+            Update-StatusSplash $splash '正在连接会话状态栏...'
+            $deadline=[DateTime]::UtcNow.AddSeconds(60)
+            $diagnoseAt=[DateTime]::UtcNow.AddSeconds(5)
+            do {
+                Start-Sleep -Milliseconds 150
+                $clients=@(Get-StatusClientProcesses $App)
+                if ($clients.Count -gt 1) { return @{ok=$false;code='ambiguous-client'} }
+                foreach ($client in $clients) {
+                    $owned=Find-StatusOwnedCdp $client
+                    if ($owned -eq $port) {
+                        $diagnostics=Get-StatusLaunchDiagnostics $App $port $client
+                        $ready=$true; return @{ok=$true; code='takeover-ready'; port=$port; identity=$client; app=$App;diagnostics=$diagnostics;launchedPid=$launchedPid}
+                    }
                 }
-            }
-            if ([DateTime]::UtcNow -ge $diagnoseAt -and -not $diagnostics) {
-                $candidate=if($clients.Count -eq 1){$clients[0]}else{$null}
-                $diagnostics=Get-StatusLaunchDiagnostics $App $port $candidate
-            }
-        } while (-not $Control.StopRequested -and [DateTime]::UtcNow -lt $deadline)
-        return @{ok=$false; code='cdp-connection-failed';diagnostics=$diagnostics;launchedPid=$launchedPid}
-    } catch { return @{ok=$false;code='exe-launch-failed';diagnostics=$diagnostics;launchedPid=$launchedPid} }
-    finally {
-        # Restore ordinary activation on every failure after exit, including discovery errors.
-        if (-not $ready) { Start-StatusClientNormally $App }
+                if ([DateTime]::UtcNow -ge $diagnoseAt -and -not $diagnostics) {
+                    $candidate=if($clients.Count -eq 1){$clients[0]}else{$null}
+                    $diagnostics=Get-StatusLaunchDiagnostics $App $port $candidate
+                }
+            } while (-not $Control.StopRequested -and [DateTime]::UtcNow -lt $deadline)
+            return @{ok=$false; code='cdp-connection-failed';diagnostics=$diagnostics;launchedPid=$launchedPid}
+        } catch { return @{ok=$false;code='exe-launch-failed';diagnostics=$diagnostics;launchedPid=$launchedPid} }
+        finally {
+            # Restore ordinary activation on every failure after exit, including discovery errors.
+            if (-not $ready) { Start-StatusClientNormally $App }
+        }
+    } finally {
+        Stop-StatusSplash $splash
     }
 }

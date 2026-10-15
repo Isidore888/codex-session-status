@@ -1,13 +1,35 @@
 # ASCII bootstrap for the Windows-bundled PowerShell 5.1; all app logic runs in saved PowerShell 7.
 [CmdletBinding()]
-param([switch]$CheckOnly, [switch]$Watch)
+param([switch]$CheckOnly, [switch]$Watch, [switch]$Setup)
 $ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent $PSScriptRoot
-$settings = Get-Content -LiteralPath (Join-Path $project 'runtime\environment.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-if (-not (Test-Path -LiteralPath $settings.powershell -PathType Leaf)) { throw 'Reconfigure the status-bar launcher: PowerShell 7 path unavailable.' }
+. (Join-Path $PSScriptRoot 'windows.ps1')
+$envFile = Join-Path $project 'runtime\environment.json'
+if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) {
+    $null = Ensure-StatusEnvironment
+}
+$settings = Get-Content -LiteralPath $envFile -Raw -Encoding UTF8 | ConvertFrom-Json
+if (-not (Test-Path -LiteralPath $settings.powershell -PathType Leaf)) {
+    $settings = Ensure-StatusEnvironment
+}
 if ($CheckOnly) {
     & $settings.powershell -NoProfile -File (Join-Path $PSScriptRoot 'launch.ps1') -CheckOnly -NoDialog
     exit $LASTEXITCODE
+}
+if ($Setup) {
+    & $settings.powershell -NoProfile -ExecutionPolicy RemoteSigned -File (Join-Path $PSScriptRoot 'manage.ps1') -Action Setup | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Show-StatusMessage '自动配置后台开机自启失败，请检查 PowerShell 7 与 Node.js 22+ 环境。'
+        exit $LASTEXITCODE
+    }
+    if (@(Get-Process ChatGPT -ErrorAction SilentlyContinue).Count -eq 0) {
+        $quote = [char]34
+        $arguments = '-NoProfile -WindowStyle Hidden -File ' + $quote + (Join-Path $PSScriptRoot 'launch.ps1') + $quote
+        Start-Process -FilePath $settings.powershell -ArgumentList $arguments -WorkingDirectory $project -WindowStyle Hidden
+    } else {
+        Show-StatusMessage 'Codex 状态栏已安装并开启开机自启！后台正在自动连接当前客户端。'
+    }
+    exit 0
 }
 if ($Watch) {
     if (-not ('SessionStatusConsole' -as [type])) { Add-Type -LiteralPath (Join-Path $PSScriptRoot 'watch-console.cs') }

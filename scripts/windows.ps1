@@ -5,14 +5,67 @@ $RuntimeRoot = Join-Path $ProjectRoot 'runtime'
 function Resolve-Node {
     $saved = Join-Path $RuntimeRoot 'environment.json'
     if (Test-Path -LiteralPath $saved) {
-        $environment = Get-Content -LiteralPath $saved -Raw | ConvertFrom-Json
-        if ($environment.node -and (Test-Path -LiteralPath $environment.node -PathType Leaf)) {
-            return [string]$environment.node
-        }
+        try {
+            $environment = Get-Content -LiteralPath $saved -Raw | ConvertFrom-Json
+            if ($environment.node -and (Test-Path -LiteralPath $environment.node -PathType Leaf)) {
+                return [string]$environment.node
+            }
+        } catch {}
     }
     $command = Get-Command node.exe -ErrorAction SilentlyContinue
-    if (-not $command) { throw '找不到 Node.js 22 或更新版本，请重新配置入口。' }
+    if (-not $command) { throw '找不到 Node.js 22 或更新版本，请先安装 Node.js 22+。' }
     return $command.Source
+}
+
+function Resolve-PowerShell7 {
+    $saved = Join-Path $RuntimeRoot 'environment.json'
+    if (Test-Path -LiteralPath $saved) {
+        try {
+            $environment = Get-Content -LiteralPath $saved -Raw | ConvertFrom-Json
+            if ($environment.powershell -and (Test-Path -LiteralPath $environment.powershell -PathType Leaf)) {
+                return [string]$environment.powershell
+            }
+        } catch {}
+    }
+    $pwsh = Get-Command pwsh.exe -ErrorAction SilentlyContinue
+    if ($pwsh) { return $pwsh.Source }
+    $candidatePaths = @(
+        (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'PowerShell\7\pwsh.exe')
+    )
+    foreach ($candidate in $candidatePaths) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { return $candidate }
+    }
+    throw '未找到 PowerShell 7 (pwsh.exe)；请先安装 PowerShell 7。'
+}
+
+function Ensure-StatusEnvironment {
+    $node = Resolve-Node
+    $version = & $node --version
+    if ($version -notmatch '^v(\d+)\.' -or [int]$Matches[1] -lt 22) { throw '需要 Node.js 22 或更新版本。' }
+    $pwsh = Resolve-PowerShell7
+    $app = Resolve-Codex
+    New-Item -ItemType Directory -Force -Path $RuntimeRoot | Out-Null
+    $envFile = Join-Path $RuntimeRoot 'environment.json'
+    $payload = @{ node = $node; powershell = $pwsh; lastAppRoot = $app.Root }
+    $payload | ConvertTo-Json | Set-Content -LiteralPath $envFile -Encoding utf8
+    return [pscustomobject]$payload
+}
+
+function Remove-LegacyDesktopShortcut {
+    try {
+        $desktop = [Environment]::GetFolderPath('Desktop')
+        if (-not $desktop) { return $false }
+        $shortcutPath = Join-Path $desktop 'Codex 状态栏.lnk'
+        if (-not (Test-Path -LiteralPath $shortcutPath -PathType Leaf)) { return $false }
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($shortcutPath)
+        if ($shortcut.WorkingDirectory -ieq $ProjectRoot) {
+            Remove-Item -LiteralPath $shortcutPath -Force -ErrorAction SilentlyContinue
+            return -not (Test-Path -LiteralPath $shortcutPath)
+        }
+    } catch {}
+    return $false
 }
 
 function Resolve-Codex {
@@ -57,7 +110,7 @@ function Resolve-Codex {
         return [pscustomobject]@{ Root=$root; Exe=$exe;
             AppId=($family + '!' + $application.Id); Version=[string]$manifest.Package.Identity.Version }
     }
-    throw '未找到当前 Codex Store 版本。请先从原图标启动一次，再重新配置入口。'
+    throw '未找到当前 Codex Store 版本。请先从原图标启动一次，再重新运行。'
 }
 
 function Get-CdpTargets([int]$Port) {
@@ -136,6 +189,152 @@ function Start-CodexWithPort($App, [int]$Port) {
     Initialize-StatusActivation
     $arguments = '--remote-debugging-port=' + $Port + ' --remote-debugging-address=127.0.0.1'
     [void][SessionStatusActivation]::Launch($App.AppId, $arguments)
+}
+
+function Initialize-StatusSplashType {
+    if ('SessionStatusSplash' -as [type]) { return $true }
+    try {
+        $references=@('System.Windows.Forms','System.Drawing')
+        if ($PSVersionTable.PSEdition -eq 'Core') {
+            Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+            $references=@(Get-ChildItem -LiteralPath (Join-Path $PSHOME 'ref') -Filter '*.dll' | ForEach-Object FullName)
+            $references+=@([System.Windows.Forms.Form].Assembly.Location,[System.Drawing.Graphics].Assembly.Location,([Reflection.Assembly]::Load('System.Windows.Forms.Primitives')).Location)
+            $references+=@(Get-ChildItem -LiteralPath $PSHOME -Filter 'System.Private.Windows*.dll' | ForEach-Object FullName)
+        }
+        Add-Type -ReferencedAssemblies $references -TypeDefinition @'
+using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Threading;
+using System.Windows.Forms;
+
+public sealed class SessionStatusSplash : IDisposable {
+    Form form;
+    string subtitle;
+    int angle;
+    bool closing;
+
+    sealed class SplashForm : Form {
+        protected override bool ShowWithoutActivation { get { return true; } }
+        protected override CreateParams CreateParams {
+            get {
+                var cp = base.CreateParams;
+                cp.ExStyle |= 0x08000088; // WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW
+                return cp;
+            }
+        }
+        public SplashForm() { DoubleBuffered = true; }
+    }
+
+    public static SessionStatusSplash Show(string text) {
+        if (!Environment.UserInteractive) return null;
+        var instance = new SessionStatusSplash { subtitle = text ?? "正在开启调试连接并重新进入 Codex..." };
+        var ready = new ManualResetEventSlim(false);
+        var thread = new Thread(() => {
+            try {
+                var f = new SplashForm {
+                    FormBorderStyle = FormBorderStyle.None,
+                    StartPosition = FormStartPosition.Manual,
+                    ShowInTaskbar = false,
+                    TopMost = true,
+                    Width = 340,
+                    Height = 88,
+                    BackColor = Color.FromArgb(28, 28, 34),
+                    Opacity = 0.0
+                };
+                var area = Screen.PrimaryScreen != null ? Screen.PrimaryScreen.WorkingArea : new Rectangle(0, 0, 1280, 720);
+                f.Location = new Point(area.Left + (area.Width - f.Width) / 2, area.Top + (area.Height - f.Height) / 2);
+                using (var path = new GraphicsPath()) {
+                    int d = 24;
+                    path.AddArc(0, 0, d, d, 180, 90);
+                    path.AddArc(f.Width - d, 0, d, d, 270, 90);
+                    path.AddArc(f.Width - d, f.Height - d, d, d, 0, 90);
+                    path.AddArc(0, f.Height - d, d, d, 90, 90);
+                    path.CloseFigure();
+                    f.Region = new Region(path);
+                }
+                f.Paint += (s, e) => {
+                    var g = e.Graphics;
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+                    using (var border = new Pen(Color.FromArgb(68, 68, 82), 1.5f)) {
+                        g.DrawRectangle(border, 1, 1, f.Width - 3, f.Height - 3);
+                    }
+                    var spinnerRect = new Rectangle(22, 24, 38, 38);
+                    using (var trackPen = new Pen(Color.FromArgb(52, 52, 64), 3.5f)) {
+                        g.DrawEllipse(trackPen, spinnerRect);
+                    }
+                    using (var arcPen = new Pen(Color.FromArgb(99, 179, 237), 3.5f)) {
+                        arcPen.StartCap = LineCap.Round;
+                        arcPen.EndCap = LineCap.Round;
+                        g.DrawArc(arcPen, spinnerRect, instance.angle, 110);
+                    }
+                    using (var titleFont = new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold))
+                    using (var subFont = new Font("Microsoft YaHei UI", 8.75f, FontStyle.Regular))
+                    using (var titleBrush = new SolidBrush(Color.FromArgb(242, 242, 247)))
+                    using (var subBrush = new SolidBrush(Color.FromArgb(174, 174, 188))) {
+                        g.DrawString("Codex 状态栏正在启动", titleFont, titleBrush, new PointF(74, 22));
+                        g.DrawString(instance.subtitle, subFont, subBrush, new PointF(74, 46));
+                    }
+                };
+                var timer = new System.Windows.Forms.Timer { Interval = 30 };
+                timer.Tick += (s, e) => {
+                    instance.angle = (instance.angle + 12) % 360;
+                    if (!instance.closing && f.Opacity < 0.95) f.Opacity = Math.Min(0.96, f.Opacity + 0.12);
+                    else if (instance.closing) {
+                        if (f.Opacity > 0.15) f.Opacity = Math.Max(0.0, f.Opacity - 0.18);
+                        else { timer.Stop(); f.Close(); }
+                    }
+                    f.Invalidate();
+                };
+                f.Shown += (s, e) => { instance.form = f; timer.Start(); ready.Set(); };
+                f.FormClosed += (s, e) => { timer.Dispose(); Application.ExitThread(); };
+                Application.Run(f);
+            } catch { ready.Set(); }
+        });
+        thread.IsBackground = true;
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        ready.Wait(600);
+        return instance;
+    }
+
+    public void UpdateText(string text) {
+        if (String.IsNullOrEmpty(text)) return;
+        subtitle = text;
+        var f = form;
+        if (f != null && !f.IsDisposed) {
+            try { f.BeginInvoke((Action)(() => f.Invalidate())); } catch {}
+        }
+    }
+
+    public void Dispose() {
+        closing = true;
+        var f = form;
+        if (f != null && !f.IsDisposed) {
+            try { f.BeginInvoke((Action)(() => { closing = true; })); } catch {}
+        }
+    }
+}
+'@
+        return $true
+    } catch { return $false }
+}
+
+function Start-StatusSplash([string]$Message = '正在开启调试连接并重新进入 Codex...') {
+    if ($env:CODEX_STATUS_NO_SPLASH -eq '1') { return $null }
+    if (-not (Initialize-StatusSplashType)) { return $null }
+    try { return [SessionStatusSplash]::Show($Message) } catch { return $null }
+}
+
+function Update-StatusSplash($Splash, [string]$Message) {
+    if ($null -eq $Splash) { return }
+    try { $Splash.UpdateText($Message) } catch {}
+}
+
+function Stop-StatusSplash($Splash) {
+    if ($null -eq $Splash) { return }
+    try { $Splash.Dispose() } catch {}
 }
 
 function Show-StatusMessage([string]$Message) {

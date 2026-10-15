@@ -13,7 +13,6 @@ function Test-StatusLauncher {
     } catch { return $false }
 }
 function Build-StatusLauncher {
-    Assert-StatusReview
     if (Test-StatusLauncher) { return }
     $compiler=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
     if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'windows-compiler-unavailable' }

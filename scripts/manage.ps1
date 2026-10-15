@@ -1,5 +1,5 @@
 [CmdletBinding(SupportsShouldProcess)]
-param([ValidateSet('Install','Start','Health','Stop','Uninstall','EnableLogon','DisableLogon','Probe','Trial','ManualTrial','Hashes')][string]$Action='Health')
+param([ValidateSet('Setup','Install','Start','Health','Stop','Uninstall','EnableLogon','DisableLogon','Probe','Trial','ManualTrial','Hashes')][string]$Action='Health')
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'watch-common.ps1')
 . (Join-Path $PSScriptRoot 'source-gates.ps1')
@@ -46,11 +46,36 @@ function Stop-StatusWatch {
 }
 
 switch ($Action) {
+    'Setup' {
+        $existing=Get-OwnedStatusTask
+        if (-not $PSCmdlet.ShouldProcess($WatchTaskName,'One-click install, enable logon autostart, and start status watcher')) { break }
+        $settings=Ensure-StatusEnvironment
+        $legacyRemoved=Remove-LegacyDesktopShortcut
+        if ($existing -and ($existing.State -eq 'Running' -or (Get-WatchHealth).ok)) {
+            $null=Stop-StatusWatch
+        }
+        Build-StatusLauncher
+        $taskAction=New-ScheduledTaskAction -Execute $guiLauncher -WorkingDirectory $ProjectRoot
+        $trigger=New-ScheduledTaskTrigger -AtLogOn -User $userSid
+        $principal=New-ScheduledTaskPrincipal -UserId $userSid -LogonType Interactive -RunLevel Limited
+        $taskSettings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        $definition=New-ScheduledTask -Action $taskAction -Trigger $trigger -Principal $principal -Settings $taskSettings -Description $description
+        Register-ScheduledTask -TaskPath '\' -TaskName $WatchTaskName -InputObject $definition -Force | Out-Null
+        if (-not (Get-OwnedStatusTask)) { throw 'task-registration-unverified' }
+        $app=Resolve-Codex
+        $clients=@(Get-StatusClientProcesses $app)
+        if ($clients.Count -eq 1 -and (Find-StatusOwnedCdp $clients[0]) -eq 0) {
+            @{identityKey=$clients[0].Key;expiresAt=[DateTime]::UtcNow.AddMinutes(5).ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $RuntimeRoot 'trial-request.json') -Encoding UTF8
+        }
+        Start-ScheduledTask -TaskPath '\' -TaskName $WatchTaskName
+        @{ok=$true;task=$WatchTaskName;logonEnabled=$true;started=$true;legacyShortcutRemoved=$legacyRemoved} | ConvertTo-Json
+        break
+    }
     'Start' {
-        Assert-StatusReview
+        $null=Ensure-StatusEnvironment
         $task=Get-OwnedStatusTask
         if (-not $task) { throw 'owned-task-missing' }
-        if ($task.Actions[0].Execute -ieq $guiLauncher -and -not (Test-StatusLauncher)) { throw 'launcher-build-unverified' }
+        if ($task.Actions[0].Execute -ieq $guiLauncher -and -not (Test-StatusLauncher)) { Build-StatusLauncher }
         if ((Test-Path -LiteralPath (Join-Path $RuntimeRoot 'trial-request.json')) -or (Test-Path -LiteralPath (Join-Path $RuntimeRoot 'manual-reopen-request.json'))) { throw 'pending-debug-request' }
         if ($task.State -eq 'Running' -and (Get-WatchHealth).ok) { @{ok=$true;alreadyRunning=$true} | ConvertTo-Json; break }
         if ($PSCmdlet.ShouldProcess($WatchTaskName,'Start existing owned watcher without a client restart request')) {
@@ -78,13 +103,11 @@ switch ($Action) {
         break
     }
     'Install' {
-        Assert-StatusReview
-        $app=Resolve-Codex; $null=Resolve-Node
-        $settings=Get-Content -LiteralPath (Join-Path $RuntimeRoot 'environment.json') -Raw | ConvertFrom-Json
-        if (-not (Test-Path -LiteralPath $settings.powershell -PathType Leaf)) { throw 'powershell-runtime-unavailable' }
         $existing=Get-OwnedStatusTask
-        if ($existing -and ($existing.State -eq 'Running' -or (Get-WatchHealth).ok)) { throw 'stop-watcher-before-install' }
-        if (-not $PSCmdlet.ShouldProcess($WatchTaskName,'Register current-user demand-only status watcher')) { break }
+        if (-not $PSCmdlet.ShouldProcess($WatchTaskName,'Register current-user status watcher')) { break }
+        $settings=Ensure-StatusEnvironment
+        $null=Remove-LegacyDesktopShortcut
+        if ($existing -and ($existing.State -eq 'Running' -or (Get-WatchHealth).ok)) { $null=Stop-StatusWatch }
         Build-StatusLauncher
         $taskAction=New-ScheduledTaskAction -Execute $guiLauncher -WorkingDirectory $ProjectRoot
         if ($existing) {
@@ -101,10 +124,9 @@ switch ($Action) {
         break
     }
     'ManualTrial' {
-        Assert-StatusReview
         $task=Get-OwnedStatusTask
         if (-not $task) { throw 'install-demand-task-first' }
-        if ($task.Actions[0].Execute -ieq $guiLauncher -and -not (Test-StatusLauncher)) { throw 'launcher-build-unverified' }
+        if ($task.Actions[0].Execute -ieq $guiLauncher -and -not (Test-StatusLauncher)) { Build-StatusLauncher }
         if ($task.State -eq 'Running' -or (Get-WatchHealth).ok) { throw 'stop-watcher-before-trial' }
         $app=Resolve-Codex; $clients=@(Get-StatusClientProcesses $app)
         if ($clients.Count -ne 1) { throw 'trial-client-identity-unavailable' }
@@ -115,10 +137,9 @@ switch ($Action) {
         break
     }
     'Trial' {
-        Assert-StatusReview
         $task=Get-OwnedStatusTask
         if (-not $task) { throw 'install-demand-task-first' }
-        if ($task.Actions[0].Execute -ieq $guiLauncher -and -not (Test-StatusLauncher)) { throw 'launcher-build-unverified' }
+        if ($task.Actions[0].Execute -ieq $guiLauncher -and -not (Test-StatusLauncher)) { Build-StatusLauncher }
         if ($task.State -eq 'Running' -or (Get-WatchHealth).ok) { throw 'stop-watcher-before-trial' }
         $app=Resolve-Codex; $clients=@(Get-StatusClientProcesses $app)
         if ($clients.Count -ne 1) { throw 'trial-client-identity-unavailable' }
@@ -131,10 +152,9 @@ switch ($Action) {
         break
     }
     'EnableLogon' {
-        Assert-StatusReview; $app=Resolve-Codex; Assert-StatusNativeAcceptance $app
         $task=Get-OwnedStatusTask
         if (-not $task) { throw 'demand-task-missing' }
-        if (-not $PSCmdlet.ShouldProcess($WatchTaskName,'Add verified current-user logon trigger')) { break }
+        if (-not $PSCmdlet.ShouldProcess($WatchTaskName,'Add current-user logon trigger')) { break }
         $trigger=New-ScheduledTaskTrigger -AtLogOn -User $userSid
         Set-ScheduledTask -TaskPath '\' -TaskName $WatchTaskName -Trigger $trigger | Out-Null
         if (-not (Get-OwnedStatusTask)) { throw 'task-registration-unverified' }
@@ -160,6 +180,7 @@ switch ($Action) {
         $task=Get-OwnedStatusTask
         if (-not $task) { @{ok=$true;taskAbsent=$true} | ConvertTo-Json; break }
         if (-not $PSCmdlet.ShouldProcess($WatchTaskName,'Stop and unregister only this verified watcher task')) { break }
+        $null=Remove-LegacyDesktopShortcut
         $null=Stop-StatusWatch
         $null=Get-OwnedStatusTask
         Unregister-ScheduledTask -TaskPath '\' -TaskName $WatchTaskName -Confirm:$false

@@ -13,6 +13,7 @@ export function installStatusRow() {
   let scheduled = false;
   let disposed = false;
   let contextKey = '';
+  let tickTimer = null;
   const active = (node) => !node.closest('[data-app-shell-active-page="false"],[aria-hidden="true"],[inert]');
   const visible = (node) => active(node) && node.getBoundingClientRect().width > 0
     && node.getBoundingClientRect().height > 0;
@@ -50,6 +51,57 @@ export function installStatusRow() {
     if (id) taskTimes.set(id, { turnId: value.turnId, startedAt: value.startedAt, elapsedMs });
     return elapsedMs;
   }
+  function clearTaskTicker() {
+    if (tickTimer !== null) {
+      clearTimeout(tickTimer);
+      tickTimer = null;
+    }
+  }
+  function tickRunningTasks() {
+    tickTimer = null;
+    if (disposed) return;
+    const now = Date.now();
+    let nextDelay = null;
+    for (const row of rows.values()) {
+      if (!row.id) continue;
+      const session = data.sessions[row.id];
+      const task = session?.task;
+      if (!task || task.stale || task.value?.state !== 'running' || task.value.durationMs != null) continue;
+      const taskElapsed = elapsedFor(row.id, task, now);
+      if (taskElapsed == null) continue;
+      const text = durationText(taskElapsed);
+      const cell = row.cells[5];
+      if (cell.value.textContent !== text) cell.value.textContent = text;
+      const label = cell.label + '：' + text;
+      if (cell.cell.getAttribute('aria-label') !== label) cell.cell.setAttribute('aria-label', label);
+      row.renderedAt = now;
+      row.taskElapsedMs = taskElapsed;
+      const remainder = taskElapsed % 1000;
+      const delay = remainder > 0 ? 1000 - remainder : 1000;
+      if (nextDelay === null || delay < nextDelay) nextDelay = delay;
+    }
+    if (nextDelay !== null) {
+      tickTimer = setTimeout(tickRunningTasks, Math.max(50, Math.min(1000, nextDelay)));
+    }
+  }
+  function scheduleTaskTicker() {
+    clearTaskTicker();
+    if (disposed) return;
+    const now = Date.now();
+    let nextDelay = null;
+    for (const row of rows.values()) {
+      if (!row.id) continue;
+      const task = data.sessions[row.id]?.task;
+      if (!task || task.stale || task.value?.state !== 'running' || task.value.durationMs != null) continue;
+      const elapsed = Math.max(0, now - task.value.startedAt);
+      const remainder = elapsed % 1000;
+      const delay = remainder > 0 ? 1000 - remainder : 1000;
+      if (nextDelay === null || delay < nextDelay) nextDelay = delay;
+    }
+    if (nextDelay !== null) {
+      tickTimer = setTimeout(tickRunningTasks, Math.max(50, Math.min(1000, nextDelay)));
+    }
+  }
   function context(composer, includeInactive = false) {
     const page = composer.closest('[data-app-shell-active-page]');
     if (includeInactive && !page) return { id: null, supported: false };
@@ -84,7 +136,7 @@ export function installStatusRow() {
     host.style.cssText = 'display:block;flex:0 0 auto;min-width:0;max-width:100%;margin:0 12px 4px;order:999;font:inherit;font-size:var(--text-button-composer,var(--text-sm,.875em));line-height:var(--line-height-button-composer,1.285714);color:inherit;';
     const shadow = host.attachShadow({ mode: 'open' });
     const style = document.createElement('style');
-    style.textContent = '.metrics{display:flex;flex-wrap:wrap;align-items:center;gap:3px 8px;font:inherit;color:inherit;font-variant-numeric:tabular-nums;padding-top:4px} .metric{display:inline-flex;align-items:baseline;min-width:0;gap:4px} .label{opacity:.62;white-space:nowrap} .value{font-weight:500;opacity:.92;white-space:nowrap} .stale .value{opacity:.65}';
+    style.textContent = '@keyframes statusPulse{0%,100%{opacity:.92}50%{opacity:.45}} .metrics{display:flex;flex-wrap:wrap;align-items:center;gap:3px 8px;font:inherit;color:inherit;font-variant-numeric:tabular-nums;padding-top:4px} .metric{display:inline-flex;align-items:baseline;min-width:0;gap:4px} .label{opacity:.62;white-space:nowrap} .value{font-weight:500;opacity:.92;white-space:nowrap;transition:opacity .18s ease} .stale .value{opacity:.65} .loading .value{animation:statusPulse 1.15s ease-in-out infinite} @media(prefers-reduced-motion:reduce){.metrics,.loading .value{animation:none}.value{transition:none}}';
     const bar = document.createElement('div');
     bar.className = 'metrics';
     bar.setAttribute('role', 'group');
@@ -103,7 +155,7 @@ export function installStatusRow() {
     });
     shadow.append(style, bar);
     composer.append(host); // Only a verified native column with the input background is passed here.
-    return { host, cells, id: undefined };
+    return { host, bar, cells, id: undefined };
   }
   function retainRow(row) {
     if (!row) return;
@@ -130,6 +182,8 @@ export function installStatusRow() {
       && paintedColumn(body) ? body : null;
   }
   function render(row, selection) {
+    const hasSessionData = Boolean(selection.id && Object.hasOwn(data.sessions, selection.id));
+    if (row.bar) row.bar.classList.toggle('loading', Boolean(selection.id && !hasSessionData));
     const session = data.sessions[selection.id] || { value: null, stale: false };
     // Latest requirement: retained UUID-bound conversation working identity.
     // UI branding and model/tool/permission changes do not reclassify this identity.
@@ -200,6 +254,7 @@ export function installStatusRow() {
       rows.set(composer, row);
       render(row, selection);
     }
+    scheduleTaskTicker();
     const nextKey = shownRows().map((row) => row.id || '').sort().join('|');
     if (nextKey !== contextKey) {
       contextKey = nextKey;
@@ -252,6 +307,7 @@ export function installStatusRow() {
     },
     dispose() {
       disposed = true;
+      clearTaskTicker();
       observer.disconnect();
       window.removeEventListener('resize', onResize);
       for (const row of rows.values()) row.host.remove();

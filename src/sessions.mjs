@@ -7,6 +7,7 @@ import { advanceTask, chooseTask } from './task-time.mjs';
 
 const MAX_HEADER_BYTES = 2 * 1024 * 1024;
 const HEADER_CHUNK_BYTES = 64 * 1024;
+const FILE_UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 
 async function readFirstLineHeader(handle) {
   const chunks = [];
@@ -29,7 +30,7 @@ async function readFirstLineHeader(handle) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
-// Index headers; keep only usage, identity and root-task UUID/time metadata.
+// Index headers by conversation filename first; keep only usage, identity and root-task UUID/time metadata.
 export class SessionStore {
   constructor(root) {
     this.root = root;
@@ -39,36 +40,72 @@ export class SessionStore {
     this.lastTasks = new Map();
     this.failedIds = new Set();
     this.indexedAt = 0;
+    this.indexedById = new Map();
     this.indexFailed = false;
   }
-  async discover(force = false) {
-    if (!force && Date.now() - this.indexedAt < 15000) return;
-    this.indexedAt = Date.now();
+  async indexFile(file) {
+    if (this.files.has(file)) return true;
+    let handle;
+    try {
+      handle = await open(file, 'r');
+      const header = await readFirstLineHeader(handle);
+      const id = header.type === 'session_meta' ? header.payload?.id : null;
+      if (typeof id === 'string' && UUID.test(id)) {
+        this.files.set(file, { id: id.toLowerCase(), offset: 0, partial: '',
+          decoder: new StringDecoder('utf8'), snapshot: null, task: null, order: 0, identity: null,
+          mode: identifyMode(header.payload?.originator) });
+        return true;
+      }
+    } catch { /* Growing headers are retried at the next index pass. */ }
+    finally { await handle?.close(); }
+    return false;
+  }
+  async discover(force = false, targetId = null) {
+    const normalizedId = typeof targetId === 'string' && UUID.test(targetId) ? targetId.toLowerCase() : null;
+    const now = Date.now();
+    if (normalizedId) {
+      const last = this.indexedById.get(normalizedId) ?? 0;
+      if (!force && now - last < 15000) return;
+      this.indexedById.set(normalizedId, now);
+    } else {
+      if (!force && now - this.indexedAt < 15000) return;
+      this.indexedAt = now;
+    }
     this.indexFailed = false;
+    if (normalizedId) {
+      const directFile = path.join(this.root, normalizedId + '.jsonl');
+      try {
+        if ((await stat(directFile)).isFile()) await this.indexFile(directFile);
+      } catch {}
+    }
+    const matchedFiles = [];
+    const fallbackFiles = [];
     const visit = async (directory, depth = 0) => {
       if (depth > 4) return;
       let entries;
       try { entries = await readdir(directory, { withFileTypes: true }); }
       catch { this.indexFailed = true; return; }
+      entries.sort((left, right) => right.name.localeCompare(left.name));
       for (const item of entries) {
         const file = path.join(directory, item.name);
         if (item.isDirectory()) { await visit(file, depth + 1); continue; }
         if (!item.isFile() || !item.name.endsWith('.jsonl') || this.files.has(file)) continue;
-        let handle;
-        try {
-          handle = await open(file, 'r');
-          const header = await readFirstLineHeader(handle);
-          const id = header.type === 'session_meta' ? header.payload?.id : null;
-          if (typeof id === 'string' && UUID.test(id)) {
-            this.files.set(file, { id: id.toLowerCase(), offset: 0, partial: '',
-              decoder: new StringDecoder('utf8'), snapshot: null, task: null, order: 0, identity: null,
-              mode: identifyMode(header.payload?.originator) });
+        const nameIds = item.name.toLowerCase().match(FILE_UUID);
+        if (normalizedId) {
+          if (nameIds) {
+            if (nameIds.includes(normalizedId)) matchedFiles.push(file);
+            // Skip unrelated UUID-named rollout files without opening them.
+          } else {
+            fallbackFiles.push(file);
           }
-        } catch { /* Growing headers are retried at the next index pass. */ }
-        finally { await handle?.close(); }
+        } else {
+          matchedFiles.push(file);
+        }
       }
     };
     await visit(this.root);
+    for (const file of matchedFiles) await this.indexFile(file);
+    for (const file of fallbackFiles) await this.indexFile(file);
   }
   async scan(file, state) {
     const details = await stat(file);
@@ -131,7 +168,11 @@ export class SessionStore {
     if (typeof id !== 'string' || !UUID.test(id)) return { value: null, stale: false };
     id = id.toLowerCase();
     const known = [...this.files.values()].some((file) => file.id === id);
-    await this.discover(force || (!known && Date.now() - this.indexedAt >= 3000));
+    const lastIndexed = this.indexedById.get(id) ?? this.indexedAt;
+    const shouldDiscover = force || (known
+      ? Date.now() - lastIndexed >= 15000
+      : (!this.indexedById.has(id) || Date.now() - lastIndexed >= 3000));
+    if (shouldDiscover) await this.discover(true, id);
     let latest = null;
     let task = null;
     let failed = this.indexFailed;

@@ -10,9 +10,11 @@ import { loopbackUrl } from '../src/cdp.mjs';
 import { identifyMode, mergeModes } from '../src/mode.mjs';
 import { advanceTask, chooseTask } from '../src/task-time.mjs';
 import { runMonitor } from '../src/monitor.mjs';
+import { installStatusRow } from '../src/renderer.mjs';
 
 const A = '11111111-1111-4111-8111-111111111111';
 const B = '22222222-2222-4222-8222-222222222222';
+const C = '33333333-3333-4333-8333-333333333333';
 const cleanDir = (directory) => rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 
 test('native geometry checks the visible host when hidden pages share its UUID', async () => {
@@ -59,6 +61,32 @@ const snapshot = (total, input = 100, cached = 80) => ({ total_token_usage: {
 const header = (id, extra = {}) => JSON.stringify({ type: 'session_meta', payload: { id, ...extra } }) + '\n';
 const event = (time, info) => JSON.stringify({ type: 'event_msg', timestamp: time,
   payload: { type: 'token_count', info } }) + '\n';
+
+test('direct filename lookup skips unrelated UUID rollout files and switches sessions immediately', async () => {
+  const root = path.resolve('runtime', 'unit');
+  await mkdir(root, { recursive: true });
+  const directory = await mkdtemp(path.join(root, 'direct-lookup-'));
+  try {
+    const subDir = path.join(directory, '2026', '10', '14');
+    await mkdir(subDir, { recursive: true });
+    await writeFile(path.join(subDir, `rollout-2026-10-14T10-00-00-${A}.jsonl`),
+      header(A, { originator: 'codex_work_desktop' }) + event('2026-10-14T10:00:01Z', snapshot(500)));
+    await writeFile(path.join(subDir, `rollout-2026-10-14T11-00-00-${B}.jsonl`),
+      header(B, { originator: 'Codex Desktop' }) + event('2026-10-14T11:00:01Z', snapshot(900)));
+    await writeFile(path.join(subDir, `rollout-2026-10-14T09-00-00-${C}.jsonl`),
+      header(C, { originator: 'Codex Desktop' }) + event('2026-10-14T09:00:01Z', snapshot(300)));
+    const store = new SessionStore(directory);
+    const resA = await store.read(A);
+    assert.equal(resA.value.totalTokens, 500);
+    assert.equal(resA.mode.value, 'Work');
+    assert.equal(store.files.size, 1, 'unrelated UUID-named rollout files must not be opened on startup');
+    // Immediate switch to B without waiting 3s
+    const resB = await store.read(B);
+    assert.equal(resB.value.totalTokens, 900);
+    assert.equal(resB.mode.value, 'Codex');
+    assert.equal(store.files.size, 2, 'only requested session files are indexed');
+  } finally { await cleanDir(directory); }
+});
 
 test('task timing follows root UUIDs, completion/abort, duplicate starts and out-of-order events', () => {
   const base=Date.parse('2026-10-12T00:00:00Z');
@@ -334,4 +362,11 @@ test('quota bridge finds a local hook-ref request client before large cache grap
   globalThis.window = { __codexRoot: { _internalRoot: { current: root } } };
   try { assert.equal(readQuota(await readDesktopQuota()).remainingPercent, 60); assert.equal(calls, 1); }
   finally { delete globalThis.window; }
+});
+
+test('renderer includes 1-second task duration ticker and initial loading animation', () => {
+  const source = installStatusRow.toString();
+  assert.ok(source.includes('tickRunningTasks'), 'renderer must include 1-second task ticker');
+  assert.ok(source.includes('scheduleTaskTicker'), 'renderer must schedule task ticker on sync');
+  assert.ok(source.includes('@keyframes statusPulse'), 'renderer must include loading pulse animation');
 });

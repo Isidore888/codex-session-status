@@ -28,7 +28,7 @@ dd{margin:2px 0 0;font-size:15px;font-variant-numeric:tabular-nums;overflow-wrap
 (() => {
   const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const pending=new Map(); let nextId=1, sessionId=null, generation=0, data=null;
-  let disposed=false, initialized=false, polling=false, timer=null, requestFailed=false;
+  let disposed=false, initialized=false, polling=false, timer=null, tickTimer=null, requestFailed=false;
   const parentOrigin=(()=>{try{return new URL(document.referrer).origin}catch{return '*'}})();
   function send(message){if(window.parent!==window)window.parent.postMessage({jsonrpc:'2.0',...message},parentOrigin)}
   function rpc(method,params){return new Promise((resolve,reject)=>{
@@ -100,7 +100,7 @@ dd{margin:2px 0 0;font-size:15px;font-variant-numeric:tabular-nums;overflow-wrap
     finally{polling=false}
   }
   function input(args){bind(args?.session_id);void poll()}
-  function stop(){disposed=true;clearInterval(timer);observer.disconnect();for(const item of pending.values()){clearTimeout(item.timeout);item.reject(new Error('teardown'))}pending.clear()}
+  function stop(){disposed=true;clearInterval(timer);clearInterval(tickTimer);observer.disconnect();for(const item of pending.values()){clearTimeout(item.timeout);item.reject(new Error('teardown'))}pending.clear()}
   window.addEventListener('message',(event)=>{
     if(event.source!==window.parent||disposed)return;
     const message=event.data;if(message?.jsonrpc!=='2.0')return;
@@ -116,7 +116,7 @@ dd{margin:2px 0 0;font-size:15px;font-variant-numeric:tabular-nums;overflow-wrap
     if(Object.hasOwn(globals,'toolInput'))input(globals.toolInput);
     if(Object.hasOwn(globals,'toolOutput'))accept({structuredContent:globals.toolOutput});
   });
-  document.addEventListener('visibilitychange',()=>{if(!document.hidden)void poll()});
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden){render();void poll()}});
   window.addEventListener('pagehide',stop,{once:true});
   let lastHeight=0;
   const observer=new ResizeObserver(()=>{const height=document.body.scrollHeight;if(height!==lastHeight){lastHeight=height;if(initialized)send({method:'ui/notifications/size-changed',params:{height}})}});
@@ -126,5 +126,9 @@ dd{margin:2px 0 0;font-size:15px;font-variant-numeric:tabular-nums;overflow-wrap
     .then((result)=>{if(disposed)return;initialized=true;theme(result?.hostContext);send({method:'ui/notifications/initialized',params:{}});send({method:'ui/notifications/size-changed',params:{height:document.body.scrollHeight}});void poll()})
     .catch(()=>{if(!window.openai?.callTool){requestFailed=true;render()}});
   timer=setInterval(poll,2000);
+  tickTimer=setInterval(()=>{
+    const task=data?.session?.task?.value;
+    if(!disposed&&!document.hidden&&task&&!data?.session?.task?.stale&&task.durationMs==null&&Number.isFinite(task.startedAt))render();
+  },1000);
 })();
 </script></body></html>

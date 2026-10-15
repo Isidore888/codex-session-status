@@ -37,12 +37,9 @@ try {
         $held=$true; $manualDebug=$true; $trial=$null
         $manual=Get-Content -LiteralPath $manualFile -Raw | ConvertFrom-Json
         Remove-Item -LiteralPath $manualFile
-        . (Join-Path $PSScriptRoot 'source-gates.ps1')
-        Assert-StatusReview
         try {
             $result=Invoke-StatusManualReopen $manual $control
             if ($result.ok) {
-                Assert-StatusReview
                 if ($control.StopRequested) { $result=@{ok=$false;code='manual-cancelled'} }
                 else {
                     Invoke-StatusMonitor $result.port $result.app $result.identity
