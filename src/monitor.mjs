@@ -105,6 +105,8 @@ export async function runMonitor({ port, sessionsRoot, clientKey = null, appVers
     } finally { refreshing = false; wake(); }
   }
   try {
+    let broughtToFrontOnConnect = false;
+    let broughtToFrontOnMount = false;
     while (!stopped) {
       let pages;
       try { pages = await listTargets(port); }
@@ -131,6 +133,10 @@ export async function runMonitor({ port, sessionsRoot, clientKey = null, appVers
             targets.set(page.id, connection);
             connection.onContextChange = wake;
             await connection.send('Runtime.addBinding', { name: '__codexSessionStatusChanged' });
+            if (!broughtToFrontOnConnect) {
+              broughtToFrontOnConnect = true;
+              try { await connection.send('Page.bringToFront'); } catch {}
+            }
           }
           await connection.evaluate(installExpression);
           const compatibility = await connection.evaluate('window.__CODEX_SESSION_STATUS_V1__?.compatibility()');
@@ -141,6 +147,10 @@ export async function runMonitor({ port, sessionsRoot, clientKey = null, appVers
           for (const id of identifiers) data[id] = await sessions.read(id);
           const result = await connection.evaluate(updateExpression({ sessions: data, quota }));
           rowCount += result?.rows || 0;
+          if (rowCount > 0 && !broughtToFrontOnMount) {
+            broughtToFrontOnMount = true;
+            try { await connection.send('Page.bringToFront'); } catch {}
+          }
         } catch {
           targets.get(page.id)?.close(); targets.delete(page.id);
         }

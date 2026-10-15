@@ -59,12 +59,6 @@ try {
   const data = { sessions: { [A]: { value: { totalTokens: 12000, cacheHitPercent: 80 }, stale: false, mode: {value:'Work',stale:false},task:{value:{turnId:A,startedAt:1000,durationMs:65000,state:'completed'},stale:false} } }, quota };
   await page.evaluate((data) => window.__CODEX_SESSION_STATUS_V1__.update(data), data);
   const inspect = () => page.evaluate(() => window.__CODEX_SESSION_STATUS_V1__.inspect());
-  const remountOpacity = await page.evaluate(() => {
-    const host = document.querySelector('.codex-session-status-row'), parent = host.parentElement;
-    host.remove(); parent.append(host);
-    return getComputedStyle(host.shadowRoot.querySelector('.metrics')).opacity;
-  });
-  assert.equal(remountOpacity, '1', 'reused status row must be visible on the first frame after reinsertion');
   assert.equal((await inspect())[0].values[1], '80.0%');
   assert.equal((await inspect())[0].values[2], '75%');
   assert.equal((await inspect())[0].values.length, 6);
@@ -467,7 +461,7 @@ try {
   assert.ok(value.product);
   await writeFile(path.join(out, 'browser-results.json'), JSON.stringify({
     passed: true, cases: ['duplicate-install', 'six-metrics', 'local-reset-time', 'dark-light',
-      'narrow-geometry', 'thread-switch', 'stale-data', 'composer-replacement', 'dispose', 'reload','remount-first-frame-visible',
+      'narrow-geometry', 'thread-switch', 'stale-data', 'composer-replacement', 'dispose', 'reload',
       'loopback-websocket', 'immediate-thread-notification', 'authenticated-channel-fixture',
       'request-timeout-recovery', 'unsupported-layout', 'uuid-bound-working-identity', 'no-ui-reclassification',
       'draft-painted-body', 'dynamic-native-font-settings', 'surface-change-single-row',

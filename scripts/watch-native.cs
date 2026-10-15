@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
@@ -27,11 +28,14 @@ public static class SessionStatusNative {
         public uint Pid; public string Path; public long StartTicks; public uint Session; public string UserSid;
         public string Key { get { return Pid + ":" + StartTicks; } }
     }
+    [StructLayout(LayoutKind.Sequential)] struct Rect { public int Left, Top, Right, Bottom; }
+    delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
     [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint rights, bool inherit, uint pid);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool QueryFullProcessImageName(IntPtr handle, uint flags, StringBuilder path, ref uint size);
     [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetProcessTimes(IntPtr handle, out FileTime created, out FileTime exited, out FileTime kernel, out FileTime user);
     [DllImport("kernel32.dll")] static extern bool ProcessIdToSessionId(uint pid, out uint session);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
     [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetTokenInformation(IntPtr token, int kind, IntPtr data, uint size, out uint needed);
     [DllImport("rstrtmgr.dll", CharSet=CharSet.Unicode)] static extern uint RmStartSession(out uint session, uint flags, StringBuilder key);
@@ -39,6 +43,23 @@ public static class SessionStatusNative {
     [DllImport("rstrtmgr.dll", CharSet=CharSet.Unicode)] static extern uint RmGetList(uint session, out uint needed, ref uint count, [In,Out] ProcessInfo[] processes, ref uint rebootReasons);
     [DllImport("rstrtmgr.dll")] static extern uint RmShutdown(uint session, uint flags, IntPtr callback);
     [DllImport("rstrtmgr.dll")] static extern uint RmEndSession(uint session);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowTextLength(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hWnd, out Rect lpRect);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern bool AllowSetForegroundWindow(uint dwProcessId);
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+    [DllImport("user32.dll", SetLastError=true)] static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
 
     public static Identity ReadIdentity(uint pid) {
         IntPtr h=OpenProcess(0x1000, false, pid); // QUERY_LIMITED_INFORMATION, never terminate access.
@@ -69,6 +90,77 @@ public static class SessionStatusNative {
     public static bool Matches(Identity expected) {
         if(expected==null) return false; var actual=ReadIdentity(expected.Pid);
         return actual!=null && expected.UserSid==CurrentUserSid && actual.UserSid==expected.UserSid && actual.StartTicks==expected.StartTicks && actual.Session==expected.Session && String.Equals(actual.Path,expected.Path,StringComparison.OrdinalIgnoreCase);
+    }
+    static List<IntPtr> FindClientWindows(uint rootPid, string exePath, bool visibleOnly) {
+        var found = new List<IntPtr>();
+        uint currentSession = (uint)Process.GetCurrentProcess().SessionId;
+        string currentSid = CurrentUserSid;
+        EnumWindows((hWnd, lParam) => {
+            if (GetWindow(hWnd, 4) != IntPtr.Zero) return true; // Skip owned child/popup windows.
+            if (visibleOnly && !IsWindowVisible(hWnd)) return true;
+            if (GetWindowTextLength(hWnd) <= 0) return true;
+            var cls = new StringBuilder(128);
+            if (GetClassName(hWnd, cls, cls.Capacity) <= 0 || cls.ToString() != "Chrome_WidgetWin_1") return true;
+            uint winPid;
+            GetWindowThreadProcessId(hWnd, out winPid);
+            if (winPid == 0) return true;
+            bool match = (rootPid != 0 && winPid == rootPid);
+            if (!match && !String.IsNullOrEmpty(exePath)) {
+                var id = ReadIdentity(winPid);
+                match = id != null && id.Session == currentSession && id.UserSid == currentSid
+                    && String.Equals(id.Path, exePath, StringComparison.OrdinalIgnoreCase);
+            }
+            if (!match) return true;
+            if (!IsIconic(hWnd)) {
+                Rect r;
+                if (GetWindowRect(hWnd, out r) && ((r.Right - r.Left) < 240 || (r.Bottom - r.Top) < 160)) return true;
+            }
+            found.Add(hWnd);
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+    public static bool HasVisibleMainWindow(uint rootPid, string exePath) {
+        foreach (var hWnd in FindClientWindows(rootPid, exePath, true)) {
+            if (!IsIconic(hWnd)) return true;
+        }
+        return false;
+    }
+    static void RestoreAndFocusWindow(IntPtr hWnd) {
+        uint fgPid;
+        IntPtr fgWnd = GetForegroundWindow();
+        uint fgThread = fgWnd != IntPtr.Zero ? GetWindowThreadProcessId(fgWnd, out fgPid) : 0;
+        uint curThread = GetCurrentThreadId();
+        bool attached = false;
+        try {
+            if (fgThread != 0 && fgThread != curThread) {
+                attached = AttachThreadInput(curThread, fgThread, true);
+            }
+            if (IsIconic(hWnd)) {
+                IntPtr res;
+                // WM_SYSCOMMAND (0x0112) + SC_RESTORE (0xF120) un-minimizes taskbar windows cleanly
+                SendMessageTimeout(hWnd, 0x0112, new IntPtr(0xF120), IntPtr.Zero, 0x0002, 400, out res);
+                ShowWindow(hWnd, 9); // SW_RESTORE (do not follow immediately with SW_SHOW)
+            } else if (!IsWindowVisible(hWnd)) {
+                ShowWindow(hWnd, 5); // SW_SHOW
+                ShowWindow(hWnd, 9); // SW_RESTORE
+            }
+            SwitchToThisWindow(hWnd, true);
+            BringWindowToTop(hWnd);
+            SetForegroundWindow(hWnd);
+        } finally {
+            if (attached) AttachThreadInput(curThread, fgThread, false);
+        }
+    }
+    public static bool ShowMainWindow(uint rootPid, string exePath) {
+        try { AllowSetForegroundWindow(0xFFFFFFFF); } catch {}
+        if (rootPid != 0) { try { AllowSetForegroundWindow(rootPid); } catch {} }
+        var windows = FindClientWindows(rootPid, exePath, true);
+        if (windows.Count == 0) windows = FindClientWindows(rootPid, exePath, false);
+        foreach (var hWnd in windows) {
+            RestoreAndFocusWindow(hWnd);
+        }
+        return HasVisibleMainWindow(rootPid, exePath);
     }
     // ProbeOnly registers one unique process and reads its impact list, but never quits it.
     public static string RestartManager(Identity expected, bool probeOnly) {

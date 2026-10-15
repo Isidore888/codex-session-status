@@ -364,9 +364,10 @@ test('quota bridge finds a local hook-ref request client before large cache grap
   finally { delete globalThis.window; }
 });
 
-test('renderer includes 1-second task duration ticker and initial loading animation', () => {
+test('renderer includes 1-second task duration ticker and fade-in/loading animations', () => {
   const source = installStatusRow.toString();
   assert.ok(source.includes('tickRunningTasks'), 'renderer must include 1-second task ticker');
   assert.ok(source.includes('scheduleTaskTicker'), 'renderer must schedule task ticker on sync');
+  assert.ok(source.includes('@keyframes statusFadeIn'), 'renderer must include smooth mount animation');
   assert.ok(source.includes('@keyframes statusPulse'), 'renderer must include loading pulse animation');
 });

@@ -191,17 +191,46 @@ function Start-CodexWithPort($App, [int]$Port) {
     [void][SessionStatusActivation]::Launch($App.AppId, $arguments)
 }
 
+function Show-StatusClientWindow($App, $Identity = $null, [int]$Port = 0) {
+    if (-not $App -or $App.Version -eq 'fixture' -or [string]::IsNullOrEmpty($App.AppId) -or ($Identity -and $Identity.Key -eq 'fixture')) { return }
+    try {
+        if (-not ('SessionStatusNative' -as [type])) {
+            $nativeFile = Join-Path $PSScriptRoot 'watch-native.cs'
+            if (Test-Path -LiteralPath $nativeFile -PathType Leaf) {
+                Add-Type -LiteralPath $nativeFile
+            }
+        }
+        $targetPid = if ($Identity -and $Identity.Pid) { [uint32]$Identity.Pid } else {
+            $proc = Get-Process ChatGPT -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($proc) { [uint32]$proc.Id } else { [uint32]0 }
+        }
+        # Always send one Store AUMID ActivateApplication to grant Windows foreground rights
+        # and tell Electron to un-minimize / un-hide its main window.
+        Initialize-StatusActivation
+        try { [void][SessionStatusActivation]::Launch($App.AppId, '') } catch {}
+        $visibleCount = 0
+        for ($i = 0; $i -lt 20; $i++) {
+            if ($i -eq 6 -or $i -eq 12) {
+                try { [void][SessionStatusActivation]::Launch($App.AppId, '') } catch {}
+            }
+            if ('SessionStatusNative' -as [type]) {
+                if ([SessionStatusNative]::ShowMainWindow($targetPid, $App.Exe)) {
+                    $visibleCount++
+                    # Confirm across two checks (~360ms apart) so delayed Electron state restore cannot re-minimize it.
+                    if ($visibleCount -ge 2) { break }
+                } else {
+                    $visibleCount = 0
+                }
+            }
+            Start-Sleep -Milliseconds 180
+        }
+    } catch {}
+}
+
 function Initialize-StatusSplashType {
     if ('SessionStatusSplash' -as [type]) { return $true }
     try {
-        $references=@('System.Windows.Forms','System.Drawing')
-        if ($PSVersionTable.PSEdition -eq 'Core') {
-            Add-Type -AssemblyName System.Windows.Forms,System.Drawing
-            $references=@(Get-ChildItem -LiteralPath (Join-Path $PSHOME 'ref') -Filter '*.dll' | ForEach-Object FullName)
-            $references+=@([System.Windows.Forms.Form].Assembly.Location,[System.Drawing.Graphics].Assembly.Location,([Reflection.Assembly]::Load('System.Windows.Forms.Primitives')).Location)
-            $references+=@(Get-ChildItem -LiteralPath $PSHOME -Filter 'System.Private.Windows*.dll' | ForEach-Object FullName)
-        }
-        Add-Type -ReferencedAssemblies $references -TypeDefinition @'
+        Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition @'
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;

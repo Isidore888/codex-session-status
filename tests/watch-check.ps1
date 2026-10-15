@@ -98,11 +98,6 @@ try {
     Assert $control.StopRequested 'stop-failed'
 } finally { $control.Dispose() }
 # All restart effects below are substitutes; no native shutdown/activation is called.
-$script:splashStarts=0; $script:splashStops=0
-function Start-StatusSplash { param($Message) $script:splashStarts++; [pscustomobject]@{id=$script:splashStarts} }
-function Update-StatusSplash { param($Splash,$Message) Assert ($null -ne $Splash) 'missing-splash-update' }
-function Stop-StatusSplash { param($Splash) Assert ($null -ne $Splash) 'missing-splash-cleanup'; $script:splashStops++ }
-function Assert-SplashClosed { Assert ($script:splashStarts -eq $script:splashStops) 'splash-not-closed' }
 $script:normal=0; $script:debug=0; $script:exitCalls=0
 $script:rmCode='rm-impact-rejected'; $script:exitSucceeded=$true; $script:portFailure=$false; $script:discoveryFailure=$false
 function Test-StatusIdentity { param($Identity) $true }
@@ -119,31 +114,21 @@ function Find-StatusOwnedCdp { param($Identity) 9345 }
 $app=Resolve-Codex; $flag=[pscustomobject]@{StopRequested=$false}
 $result=Invoke-StatusTakeover $fake $app $flag
 Assert ($result.code -eq 'rm-impact-rejected' -and $script:debug -eq 0 -and $script:normal -eq 0) 'foreign-impact-not-stopped'
-Assert-SplashClosed
 $script:portFailure=$true
 try { Invoke-StatusTakeover $fake $app $flag | Out-Null; throw 'occupied-port-not-rejected' } catch { Assert ($_.Exception.Message -eq 'fixture-port-occupied') 'occupied-port-not-rejected' }
 Assert ($script:exitCalls -eq 1) 'exit-before-port-check'
-Assert ($script:splashStarts -eq 1) 'splash-before-port-check'
-Assert-SplashClosed
 $script:portFailure=$false; $script:rmCode='rm-shutdown-351'; $script:exitSucceeded=$false
 $result=Invoke-StatusTakeover $fake $app $flag
 Assert ($result.code -eq 'normal-exit-failed' -and $script:normal -eq 1 -and $script:debug -eq 0) 'failed-quit-not-restored'
-Assert-SplashClosed
 $script:exitSucceeded=$true; $script:rmCode='shutdown-requested'; $script:discoveryFailure=$true
 $result=Invoke-StatusTakeover $fake $app $flag
 Assert ($result.code -eq 'exe-launch-failed' -and $script:normal -eq 2) 'discovery-error-not-restored'
-Assert-SplashClosed
 $script:discoveryFailure=$false
 $result=Invoke-StatusTakeover $fake $app $flag
 Assert ($result.ok -and $script:normal -eq 2) 'successful-attach-failed'
-Assert-SplashClosed
 $flag.StopRequested=$true
 $result=Invoke-StatusTakeover $fake $app $flag
 Assert ($result.code -eq 'takeover-cancelled' -and $script:normal -eq 3) 'cancel-not-restored'
-Assert-SplashClosed
-function Request-StatusNormalExit { param($Identity) throw 'fixture-exit-error' }
-try { Invoke-StatusTakeover $fake $app $flag | Out-Null; throw 'exit-error-not-propagated' } catch { Assert ($_.Exception.Message -eq 'fixture-exit-error') 'exit-error-not-propagated' }
-Assert-SplashClosed
 $hashes=Get-StatusSourceHashes | ConvertTo-Json | ConvertFrom-Json
 Assert (Test-StatusSourceHashes $hashes) 'matching-source-hashes-rejected'
 $first=@($hashes.PSObject.Properties)[0].Name

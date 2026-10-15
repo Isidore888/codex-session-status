@@ -47,13 +47,13 @@ function Stop-StatusWatch {
 
 switch ($Action) {
     'Setup' {
-        $existing=Get-OwnedStatusTask
-        if (-not $PSCmdlet.ShouldProcess($WatchTaskName,'One-click install, enable logon autostart, and start status watcher')) { break }
         $settings=Ensure-StatusEnvironment
         $legacyRemoved=Remove-LegacyDesktopShortcut
+        $existing=Get-OwnedStatusTask
         if ($existing -and ($existing.State -eq 'Running' -or (Get-WatchHealth).ok)) {
             $null=Stop-StatusWatch
         }
+        if (-not $PSCmdlet.ShouldProcess($WatchTaskName,'One-click install, enable logon autostart, and start status watcher')) { break }
         Build-StatusLauncher
         $taskAction=New-ScheduledTaskAction -Execute $guiLauncher -WorkingDirectory $ProjectRoot
         $trigger=New-ScheduledTaskTrigger -AtLogOn -User $userSid
@@ -103,11 +103,11 @@ switch ($Action) {
         break
     }
     'Install' {
-        $existing=Get-OwnedStatusTask
-        if (-not $PSCmdlet.ShouldProcess($WatchTaskName,'Register current-user status watcher')) { break }
         $settings=Ensure-StatusEnvironment
         $null=Remove-LegacyDesktopShortcut
+        $existing=Get-OwnedStatusTask
         if ($existing -and ($existing.State -eq 'Running' -or (Get-WatchHealth).ok)) { $null=Stop-StatusWatch }
+        if (-not $PSCmdlet.ShouldProcess($WatchTaskName,'Register current-user status watcher')) { break }
         Build-StatusLauncher
         $taskAction=New-ScheduledTaskAction -Execute $guiLauncher -WorkingDirectory $ProjectRoot
         if ($existing) {
@@ -177,10 +177,10 @@ switch ($Action) {
     }
     'Stop' { if ($PSCmdlet.ShouldProcess($WatchTaskName,'Stop this tool and remove its rows')) { Stop-StatusWatch | ConvertTo-Json }; break }
     'Uninstall' {
+        $null=Remove-LegacyDesktopShortcut
         $task=Get-OwnedStatusTask
         if (-not $task) { @{ok=$true;taskAbsent=$true} | ConvertTo-Json; break }
         if (-not $PSCmdlet.ShouldProcess($WatchTaskName,'Stop and unregister only this verified watcher task')) { break }
-        $null=Remove-LegacyDesktopShortcut
         $null=Stop-StatusWatch
         $null=Get-OwnedStatusTask
         Unregister-ScheduledTask -TaskPath '\' -TaskName $WatchTaskName -Confirm:$false

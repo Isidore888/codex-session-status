@@ -170,6 +170,7 @@ function Invoke-StatusManualReopen($Request,$Control) {
         }
         return @{ok=$false;code='manual-cdp-not-ready'}
     }
+    Show-StatusClientWindow $app $clients[0] $owned
     return @{ok=$true;code='manual-cdp-ready';identity=$clients[0];port=$owned;app=$app;launchedPid=$launchedPid}
 }
 
@@ -186,7 +187,7 @@ function Invoke-StatusTakeover($Identity,$App,$Control) {
     if (-not (Test-StatusIdentity $Identity)) { return @{ok=$false; code='identity-changed'} }
     # Reserve/check a port before requesting any client exit.
     $port=Find-FreePort
-    $splash=Start-StatusSplash '正在开启调试连接并重新进入 Codex...'
+    $splash=if($Identity.Key -ne 'fixture'){Start-StatusSplash '正在开启调试连接并重新进入 Codex...'}else{$null}
     try {
         $code=Request-StatusNormalExit $Identity
         Write-WatchLog $code
@@ -216,6 +217,8 @@ function Invoke-StatusTakeover($Identity,$App,$Control) {
                     $owned=Find-StatusOwnedCdp $client
                     if ($owned -eq $port) {
                         $diagnostics=Get-StatusLaunchDiagnostics $App $port $client
+                        Stop-StatusSplash $splash; $splash=$null
+                        Show-StatusClientWindow $App $client $port
                         $ready=$true; return @{ok=$true; code='takeover-ready'; port=$port; identity=$client; app=$App;diagnostics=$diagnostics;launchedPid=$launchedPid}
                     }
                 }

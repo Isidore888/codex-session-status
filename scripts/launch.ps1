@@ -19,7 +19,11 @@ try {
     New-Item -ItemType Directory -Force -Path $RuntimeRoot | Out-Null
     $monitor = Join-Path $ProjectRoot 'src\monitor.mjs'
     $health = & $node $monitor --health | ConvertFrom-Json
-    if ($health.ok -and $port) { exit 0 }
+    if ($health.ok -and $port) {
+        # If the client was minimized or hidden to the system tray, pop its main window up.
+        Show-StatusClientWindow $app $null $port
+        exit 0
+    }
     if ($health.ok) {
         # A just-closed client can leave its companion in the reload grace period.
         # Stop only the companion, so an immediate second launch can start Codex normally.
@@ -33,6 +37,7 @@ try {
     }
     if (-not $port) {
         if (@(Get-Process ChatGPT -ErrorAction SilentlyContinue).Count -gt 0) {
+            Show-StatusClientWindow $app $null 0
             $message = 'Codex 当前未开放状态栏连接。请先保存工作并正常退出 Codex，或双击“启动状态栏.cmd”开启自动接管。'
             if ($NoDialog) { Write-Output $message } else { Show-StatusMessage $message }
             exit 2
@@ -57,7 +62,12 @@ try {
     for ($attempt=0; $attempt -lt 12; $attempt++) {
         Start-Sleep -Milliseconds 500
         $health = & $node $monitor --health | ConvertFrom-Json
-        if ($health.ok) { exit 0 }
+        if ($health.ok) {
+            Stop-StatusSplash $splash
+            $splash = $null
+            Show-StatusClientWindow $app $null $port
+            exit 0
+        }
         if ($child.HasExited) { break }
     }
     throw '状态栏没有成功启动。请查看项目 runtime\monitor.log；Codex 可以继续正常使用。'
