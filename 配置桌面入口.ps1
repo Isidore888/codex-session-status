@@ -28,7 +28,7 @@ if (-not $ProjectOnly) {
     $shortcut.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $shortcut.Arguments = $arguments
     $shortcut.WorkingDirectory = $ProjectRoot
-    $shortcut.Description = '启动 Codex 并自动显示四项会话状态'
+    $shortcut.Description = '启动 Codex 并自动显示六项会话状态'
     $iconSource = Join-Path (Split-Path -Parent $app.Exe) 'resources\icon-chatgpt.ico'
     if (Test-Path -LiteralPath $iconSource) {
         $icon = Join-Path $RuntimeRoot 'codex.ico'

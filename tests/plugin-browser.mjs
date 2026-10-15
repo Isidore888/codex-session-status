@@ -15,7 +15,8 @@ try{
   await page.setContent('<!doctype html><html><body style="margin:0"><iframe style="border:0;width:100%;height:360px" title="会话状态"></iframe></body></html>');
   await page.evaluate(({html,A,B})=>{
     const frame=document.querySelector('iframe');window.current=A;window.polls=0;window.delay=0;
-    window.snapshot=(id)=>({binding:{sessionId:id,source:'host-thread-metadata'},session:{value:{totalTokens:id===A?12000:90000,cacheHitPercent:id===A?80:25},stale:false},
+    window.snapshot=(id)=>({binding:{sessionId:id,source:'host-thread-metadata'},session:{value:{totalTokens:id===A?12000:90000,cacheHitPercent:id===A?80:25},stale:false,
+      task:{value:{turnId:id,startedAt:1000,durationMs:id===A?65000:70000,state:'completed'},stale:false}},
       quota:{value:{remainingPercent:61,resetsAt:1791683809},updatedAt:Date.now(),stale:false},mode:{value:id===A?'Work':'Codex',stale:false}});
     window.notify=(method,params)=>frame.contentWindow.postMessage({jsonrpc:'2.0',method,params},'*');
     window.addEventListener('message',async(event)=>{
@@ -34,8 +35,9 @@ try{
   },{html,A,B});
   const frame=page.frameLocator('iframe');
   await frame.locator('#mode').getByText('Work',{exact:true}).waitFor();
-  assert.equal(await frame.locator('.metric').count(),5);assert.equal(await frame.locator('#cache').textContent(),'80.0%');
-  assert.equal(await frame.locator('#remaining').textContent(),'61%');checks.push('five fields and Work binding');
+  assert.equal(await frame.locator('.metric').count(),6);assert.equal(await frame.locator('#cache').textContent(),'80.0%');
+  assert.equal(await frame.locator('#remaining').textContent(),'61%');
+  assert.equal(await frame.locator('#duration').textContent(),'01:05');checks.push('six fields and Work binding');
   assert.deepEqual(await page.evaluate(()=>window.initParams.appCapabilities.availableDisplayModes),['inline','pip','fullscreen']);checks.push('MCP Apps handshake');
   const reset=await frame.locator('#reset').textContent();assert.match(reset,/10.*11.*09:56/);checks.push('local reset date and time');
   await page.screenshot({path:path.join(out,'plugin-light.png')});
@@ -45,14 +47,16 @@ try{
   const fits=await frame.locator('body').evaluate(node=>node.scrollWidth<=innerWidth);assert.ok(fits);
   await page.screenshot({path:path.join(out,'plugin-narrow.png')});checks.push('280px layout without horizontal overflow');
   await page.evaluate(({B})=>{window.current=B;window.notify('ui/notifications/tool-input',{arguments:{session_id:B}})}, {B});
-  await frame.locator('#mode').getByText('Codex',{exact:true}).waitFor();assert.equal(await frame.locator('#cache').textContent(),'25.0%');checks.push('conversation switch changes usage and mode');
+  await frame.locator('#mode').getByText('Codex',{exact:true}).waitFor();assert.equal(await frame.locator('#cache').textContent(),'25.0%');
+  assert.equal(await frame.locator('#duration').textContent(),'01:10');checks.push('conversation switch changes usage, duration and mode');
   await page.evaluate(({A})=>{window.current=A;window.notify('ui/notifications/tool-result',{structuredContent:window.snapshot(A)})},{A});
   assert.equal(await frame.locator('#mode').textContent(),'Codex');checks.push('late result from another conversation rejected');
   await frame.locator('#mode').getByText('Work',{exact:true}).waitFor({timeout:6000});checks.push('host-authoritative context rebind on poll');
   await page.evaluate(()=>{const data=window.snapshot(window.current);data.quota.stale=true;window.notify('ui/notifications/tool-result',{structuredContent:data})});
   await frame.locator('#remaining.stale').waitFor();assert.equal(await frame.locator('#remaining').textContent(),'61%');checks.push('failed quota preserves value and marks stale');
   await page.evaluate(()=>window.notify('ui/notifications/tool-input',{arguments:{}}));
-  await frame.locator('#mode').getByText('未知',{exact:true}).waitFor();assert.equal(await frame.locator('#tokens').textContent(),'--');checks.push('unbound panel does not guess latest session');
+  await frame.locator('#mode').getByText('未知',{exact:true}).waitFor();assert.equal(await frame.locator('#tokens').textContent(),'--');
+  assert.equal(await frame.locator('#duration').textContent(),'--');checks.push('unbound panel does not guess latest session');
   await page.emulateMedia({reducedMotion:'reduce'});
   await frame.locator('dd').evaluateAll(nodes=>nodes.forEach(node=>node.style.fontSize='24px'));assert.ok(await frame.locator('body').evaluate(node=>node.scrollWidth<=innerWidth));checks.push('text scaling and reduced motion');
   await page.evaluate(({A})=>window.notify('ui/notifications/tool-input',{arguments:{session_id:A}}),{A});

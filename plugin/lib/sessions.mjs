@@ -5,6 +5,30 @@ import { UUID, readUsage, chooseSnapshot } from './metrics.mjs';
 import { identifyMode, mergeModes } from './mode.mjs';
 import { advanceTask, chooseTask } from './task-time.mjs';
 
+const MAX_HEADER_BYTES = 2 * 1024 * 1024;
+const HEADER_CHUNK_BYTES = 64 * 1024;
+
+async function readFirstLineHeader(handle) {
+  const chunks = [];
+  let total = 0;
+  while (total < MAX_HEADER_BYTES) {
+    const length = Math.min(HEADER_CHUNK_BYTES, MAX_HEADER_BYTES - total);
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, total);
+    if (!bytesRead) break;
+    const slice = buffer.subarray(0, bytesRead);
+    const newline = slice.indexOf(10); // '\n'
+    if (newline !== -1) {
+      chunks.push(slice.subarray(0, newline));
+      return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    }
+    chunks.push(slice);
+    total += bytesRead;
+  }
+  if (!chunks.length || total >= MAX_HEADER_BYTES) throw new Error('session-header-incomplete');
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
 // Index headers; keep only usage, identity and root-task UUID/time metadata.
 export class SessionStore {
   constructor(root) {
@@ -13,6 +37,7 @@ export class SessionStore {
     this.lastValues = new Map();
     this.lastModes = new Map();
     this.lastTasks = new Map();
+    this.failedIds = new Set();
     this.indexedAt = 0;
     this.indexFailed = false;
   }
@@ -32,10 +57,7 @@ export class SessionStore {
         let handle;
         try {
           handle = await open(file, 'r');
-          const bytes = Buffer.alloc(64 * 1024);
-          const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
-          const first = bytes.subarray(0, bytesRead).toString('utf8').split('\n')[0];
-          const header = JSON.parse(first);
+          const header = await readFirstLineHeader(handle);
           const id = header.type === 'session_meta' ? header.payload?.id : null;
           if (typeof id === 'string' && UUID.test(id)) {
             this.files.set(file, { id: id.toLowerCase(), offset: 0, partial: '',
@@ -53,17 +75,25 @@ export class SessionStore {
     const identity = String(details.dev) + ':' + String(details.ino) + ':' + String(details.birthtimeMs);
     if (details.size < state.offset || (state.identity && state.identity !== identity)) {
       Object.assign(state, { offset: 0, partial: '', decoder: new StringDecoder('utf8'),
-        snapshot: null, task: null, order: 0 });
+        snapshot: null, task: null, order: 0, mode: null });
     }
     state.identity = identity;
     const end = details.size;
     const handle = await open(file, 'r');
     try {
       if (state.offset === 0) {
-        const headerBytes = Buffer.alloc(64 * 1024);
-        const { bytesRead } = await handle.read(headerBytes, 0, headerBytes.length, 0);
-        const header = JSON.parse(headerBytes.subarray(0, bytesRead).toString('utf8').split('\n')[0]);
-        if (header.type !== 'session_meta' || header.payload?.id?.toLowerCase() !== state.id) {
+        const header = await readFirstLineHeader(handle);
+        const nextId = header.type === 'session_meta' && typeof header.payload?.id === 'string'
+          && UUID.test(header.payload.id) ? header.payload.id.toLowerCase() : null;
+        if (nextId !== state.id) {
+          this.failedIds.add(state.id);
+          if (nextId) {
+            Object.assign(state, { id: nextId, offset: 0, partial: '',
+              decoder: new StringDecoder('utf8'), snapshot: null, task: null, order: 0,
+              mode: identifyMode(header.payload?.originator) });
+          } else {
+            this.files.delete(file);
+          }
           throw new Error('session-identity-changed');
         }
         state.mode = identifyMode(header.payload?.originator);
@@ -100,18 +130,28 @@ export class SessionStore {
   async read(id, force = false) {
     if (typeof id !== 'string' || !UUID.test(id)) return { value: null, stale: false };
     id = id.toLowerCase();
-    await this.discover(force || ![...this.files.values()].some((file) => file.id === id));
+    const known = [...this.files.values()].some((file) => file.id === id);
+    await this.discover(force || (!known && Date.now() - this.indexedAt >= 3000));
     let latest = null;
     let task = null;
     let failed = this.indexFailed;
+    let scannedCount = 0;
     const modes = [];
     for (const [file, state] of this.files) {
       if (state.id !== id) continue;
-      try { await this.scan(file, state); } catch { failed = true; }
+      try {
+        await this.scan(file, state);
+        scannedCount++;
+      } catch { failed = true; }
+      if (state.id !== id) continue;
       modes.push(state.mode);
       latest = chooseSnapshot(latest, state.snapshot);
       task = chooseTask(task, state.task);
     }
+    if (!failed && scannedCount > 0) {
+      this.failedIds.delete(id);
+    }
+    failed ||= this.failedIds.has(id);
     const value = latest?.value ?? null;
     const mode = mergeModes(modes);
     if (failed) return { value: this.lastValues.get(id) ?? value, stale: true,

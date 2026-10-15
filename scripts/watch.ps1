@@ -27,6 +27,7 @@ try {
         if (-not (Test-StatusTrialRequest $trial)) { $trial=$null }
     }
     $app=Resolve-Codex
+    $appResolvedAt=[DateTime]::UtcNow
     foreach ($client in @(Get-StatusClientProcesses $app)) { [void]$seen.Add($client.Key) }
     if ($trial) { [void]$seen.Remove([string]$trial.identityKey) }
     Write-WatchLog 'watch-started'
@@ -60,7 +61,10 @@ try {
     while (-not $control.StopRequested) {
         $phase='watching'; $code='idle'; $clientPid=0
         try {
-            $app=Resolve-Codex
+            if (-not $app -or ([DateTime]::UtcNow-$appResolvedAt).TotalSeconds -ge 15 -or -not (Test-Path -LiteralPath $app.Exe -PathType Leaf)) {
+                $app=Resolve-Codex
+                $appResolvedAt=[DateTime]::UtcNow
+            }
             $clients=@(Get-StatusClientProcesses $app)
             if (-not $clients.Count) {
                 $seen.Clear(); $held=$false
@@ -104,7 +108,7 @@ try {
             Write-WatchLog $code; $lastCode=$code
             [IO.File]::WriteAllText((Join-Path $RuntimeRoot 'watch-state.json'),$control.Health)
         }
-        $waitTicks=if($code -eq 'idle'){40}else{8}
+        $waitTicks=if($code -eq 'idle'){2}else{4}
         for ($i=0;$i -lt $waitTicks -and -not $control.StopRequested;$i++) { Start-Sleep -Milliseconds 250 }
     }
 } finally {

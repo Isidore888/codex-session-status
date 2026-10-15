@@ -12,7 +12,7 @@ try{
   await page.goto(url);const frame=page.frameLocator('iframe');
   await frame.locator('#mode').getByText('Work',{exact:true}).waitFor();
   const quota=await frame.locator('#remaining').textContent();assert.match(quota,/^\d+(\.\d+)?%$/);
-  assert.equal(await frame.locator('.metric').count(),5);
+  assert.equal(await frame.locator('.metric').count(),6);
   assert.equal(await frame.locator('.stale').count(),0);
   await page.screenshot({path:'runtime/verification/plugin-real-preview.png'});
   const fields=await frame.locator('dd').allTextContents();

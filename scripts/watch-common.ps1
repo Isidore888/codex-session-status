@@ -33,7 +33,9 @@ function Test-StatusTrialRequest($Request) {
 function Get-StatusClientProcesses($App) {
     $leaf=[IO.Path]::GetFileName($App.Exe)
     if ($leaf -notmatch '^[a-zA-Z0-9._-]+\.exe$') { throw 'invalid-client-executable' }
-    # Only parse --type/parent identity. Never export command lines or message contents.
+    $stem=[IO.Path]::GetFileNameWithoutExtension($leaf)
+    if (-not @(Get-Process -Name $stem -ErrorAction SilentlyContinue).Count) { return @() }
+    # Only parse process type, parent identity and a debug-flag boolean; never retain command lines.
     $records=@(Get-CimInstance Win32_Process -Filter ("Name='"+$leaf+"'") -ErrorAction Stop)
     $session=[Diagnostics.Process]::GetCurrentProcess().SessionId
     $imagePids=@($records | ForEach-Object {
@@ -44,7 +46,10 @@ function Get-StatusClientProcesses($App) {
         if ($record.ProcessId -notin $imagePids -or $record.ParentProcessId -in $imagePids) { continue }
         if (-not $record.CommandLine -or $record.CommandLine -match '(?i)(?:^|\s)--type(?:=|\s)') { continue }
         $identity=[SessionStatusNative]::ReadIdentity([uint32]$record.ProcessId)
-        if ($identity -and $identity.UserSid -eq [SessionStatusNative]::CurrentUserSid -and $identity.Path -ieq $App.Exe -and $identity.Session -eq $session) { $identity }
+        if ($identity -and $identity.UserSid -eq [SessionStatusNative]::CurrentUserSid -and $identity.Path -ieq $App.Exe -and $identity.Session -eq $session) {
+            $identity | Add-Member -NotePropertyName HasDebugPort -NotePropertyValue ([bool]($record.CommandLine -match '(?i)(?:^|\s)--remote-debugging-port(?:=|\s|$)')) -Force
+            $identity
+        }
     }
 }
 function Find-StatusOwnedCdp($Identity) {
@@ -111,7 +116,7 @@ function Test-StatusIdentity($Identity) { [SessionStatusNative]::Matches($Identi
 function Request-StatusNormalExit($Identity) { [SessionStatusNative]::RestartManager($Identity,$false) }
 function Wait-StatusExit($Identity) {
     $deadline=[DateTime]::UtcNow.AddSeconds(20)
-    while ((Test-StatusIdentity $Identity) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 250 }
+    while ((Test-StatusIdentity $Identity) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
     return -not (Test-StatusIdentity $Identity)
 }
 
@@ -152,7 +157,7 @@ function Invoke-StatusManualReopen($Request,$Control) {
     $deadline=(Get-StatusManualTime).AddSeconds(60)
     do {
         if ($Control.StopRequested) { return @{ok=$false;code='manual-cancelled'} }
-        Start-Sleep -Milliseconds 500
+        Start-Sleep -Milliseconds 250
         $clients=@(Get-StatusClientProcesses $app)
         if ($clients.Count -gt 1) { return @{ok=$false;code='manual-client-changed'} }
         $owned=if($clients.Count -eq 1){Find-StatusOwnedCdp $clients[0]}else{0}
@@ -171,8 +176,9 @@ function Invoke-StatusManualReopen($Request,$Control) {
 function Get-WatchDecision($Identity,[int]$Port,[bool]$Seen,[int]$ClientCount,[double]$AgeSeconds) {
     if ($ClientCount -ne 1) { return 'ambiguous-client' }
     if ($Port -gt 0) { return 'attach' }
+    if ($Identity.HasDebugPort) { return 'wait' }
     if ($Seen) { return 'observe' }
-    if ($AgeSeconds -lt 2) { return 'wait' }
+    if ($AgeSeconds -lt 0) { return 'wait' }
     return 'takeover'
 }
 
@@ -199,7 +205,7 @@ function Invoke-StatusTakeover($Identity,$App,$Control) {
         $deadline=[DateTime]::UtcNow.AddSeconds(60)
         $diagnoseAt=[DateTime]::UtcNow.AddSeconds(5)
         do {
-            Start-Sleep -Milliseconds 500
+            Start-Sleep -Milliseconds 150
             $clients=@(Get-StatusClientProcesses $App)
             if ($clients.Count -gt 1) { return @{ok=$false;code='ambiguous-client'} }
             foreach ($client in $clients) {

@@ -7,7 +7,7 @@ export function installStatusRow() {
   const idSelector = idAttributes.map((name) => '[' + name + ']').join(',');
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const rows = new Map();
-  const retainedRows = new Map(); // Reuse only for the same explicit conversation UUID.
+  const retainedRows = new Map(); // Reuse only for the same explicit conversation UUID (LRU bounded).
   const taskTimes = new Map(); // Survives row reuse/remount; only UUID-bound numeric metadata.
   let data = { sessions: {}, quota: { value: null, stale: false } };
   let scheduled = false;
@@ -108,7 +108,11 @@ export function installStatusRow() {
   function retainRow(row) {
     if (!row) return;
     row.host.remove();
-    if (row.id && uuid.test(row.id)) retainedRows.set(row.id, row);
+    if (row.id && uuid.test(row.id)) {
+      retainedRows.delete(row.id);
+      retainedRows.set(row.id, row);
+      if (retainedRows.size > 16) retainedRows.delete(retainedRows.keys().next().value);
+    }
   }
   function surface(composer) {
     const paintedColumn = (node) => {
@@ -204,10 +208,15 @@ export function installStatusRow() {
   }
   function shownRows() { return [...rows.values()].filter((row) => visible(row.host)); }
   const observer = new MutationObserver((records) => {
-    const relevant = records.some((record) => record.type === 'attributes'
-      || (record.target.nodeType === 1 && (record.target.closest(selector) || record.target.querySelector(selector)))
-      || [...record.addedNodes, ...record.removedNodes].some((node) => node.nodeType === 1
-        && (node.matches(selector) || node.querySelector(selector))));
+    const relevant = records.some((record) => {
+      if (record.type === 'attributes') {
+        return idAttributes.includes(record.attributeName)
+          || (record.target.nodeType === 1 && (record.target.closest(selector) || record.target.querySelector(selector)));
+      }
+      return (record.target.nodeType === 1 && record.target.closest(selector))
+        || [...record.addedNodes, ...record.removedNodes].some((node) => node.nodeType === 1
+          && (node.matches(selector) || node.querySelector(selector)));
+    });
     // Repair a native composer commit in this microtask, before its first paint.
     // Deferring to another animation frame briefly shrinks then expands the input.
     if (relevant) sync();

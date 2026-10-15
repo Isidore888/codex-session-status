@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdir, writeFile, unlink, rmdir, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, rm, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { bindSession, identifyMode, readThreadContext, StatusService } from '../plugin/lib/status.mjs';
@@ -22,19 +22,18 @@ test('explicit local originators distinguish Work and Codex; model/client hints 
   for(const hint of ['vscode','gpt-6.1-sol','codex',null,'work','codex_desktop'])assert.equal(identifyMode(hint),null);
 });
 test('plugin includes exact shared cumulative parsers',async()=>{
-  for(const file of ['metrics.mjs','sessions.mjs','task-time.mjs'])assert.equal(await readFile('plugin/lib/'+file,'utf8'),await readFile('src/'+file,'utf8'));
+  for(const file of ['metrics.mjs','sessions.mjs','mode.mjs','task-time.mjs'])assert.equal(await readFile('plugin/lib/'+file,'utf8'),await readFile('src/'+file,'utf8'));
 });
 test('project/conversation switch, numeric-only data, read-only mode DB and quota TTL',async()=>{
   const root=path.resolve('runtime','plugin-fixture-'+randomUUID());
   const sessions=path.join(root,'sessions');await mkdir(sessions,{recursive:true});
-  const files=[];const dbPath=path.join(root,'state_5.sqlite');
+  const dbPath=path.join(root,'state_5.sqlite');
   const db=new DatabaseSync(dbPath);
   db.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, originator TEXT, title TEXT)');
   const insert=db.prepare('INSERT INTO threads VALUES (?,?,?)');
   insert.run(A,'codex_work_desktop','PRIVATE_BODY_DO_NOT_EXPORT');insert.run(B,'Codex Desktop','PRIVATE_TITLE_DO_NOT_EXPORT');db.close();
-  files.push(dbPath);
   for(const [id,total]of [[A,100],[B,900]]){
-    const file=path.join(sessions,id+'.jsonl');files.push(file);
+    const file=path.join(sessions,id+'.jsonl');
     await writeFile(file,JSON.stringify({type:'session_meta',payload:{id}})+'\n'+JSON.stringify({timestamp:'2026-10-11T01:00:00Z',type:'event_msg',payload:{type:'token_count',info:{total_token_usage:{total_tokens:total,input_tokens:80,cached_input_tokens:40}}}})+'\n');
   }
   try{
@@ -50,7 +49,7 @@ test('project/conversation switch, numeric-only data, read-only mode DB and quot
     assert.equal(calls,2);assert.equal(stale.quota.stale,true);assert.equal(stale.quota.value.remainingPercent,61);
     const missing=await service.read({},{});assert.equal(missing.session.value,null);assert.equal(missing.mode.value,null);
     assert.equal(readThreadContext(dbPath,'33333333-3333-4333-8333-333333333333').mode,null);
-  }finally{for(const file of files)await unlink(file);await rmdir(sessions);await rmdir(root)}
+  }finally{await rm(root,{recursive:true,force:true,maxRetries:5,retryDelay:50})}
 });
 test('missing 300-minute bucket stays empty; no alternate-period substitution',async()=>{
   const service=new StatusService({codexRoot:path.resolve('runtime/nonexistent'),dataDirectory:path.resolve('runtime/nonexistent'),

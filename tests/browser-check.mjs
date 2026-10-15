@@ -203,6 +203,23 @@ try {
   await page.setViewportSize({ width: 380, height: 600 });
   await assertGeometry();
   await page.screenshot({ path: path.join(out, 'status-narrow.png') });
+  const siblingSwitch = await page.evaluate(async ({ A, B }) => {
+    const main = document.querySelector('main'), marker = document.createElement('span');
+    main.removeAttribute('data-thread-id');
+    marker.setAttribute('data-above-composer-conversation-id', A);
+    main.prepend(marker);
+    await new Promise(queueMicrotask);
+    marker.setAttribute('data-above-composer-conversation-id', B);
+    await new Promise(queueMicrotask);
+    const host = main.querySelector('.codex-session-status-row');
+    const switched = { threadId: host.dataset.statusThread,
+      tokenText: host.shadowRoot.querySelector('.value').textContent };
+    marker.remove(); main.setAttribute('data-thread-id', A);
+    await new Promise(queueMicrotask);
+    return switched;
+  }, { A, B });
+  assert.equal(siblingSwitch.threadId, B, 'sibling identity changes sync before the next backend poll');
+  assert.equal(siblingSwitch.tokenText, '—', 'sibling switch cannot retain another UUID usage');
   await page.evaluate((id) => document.querySelector('main').setAttribute('data-thread-id', id), B);
   await page.waitForFunction(() => window.__CODEX_SESSION_STATUS_V1__.inspect()[0].threadId
     === '22222222-2222-4222-8222-222222222222');

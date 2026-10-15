@@ -13,6 +13,8 @@ import { runMonitor } from '../src/monitor.mjs';
 
 const A = '11111111-1111-4111-8111-111111111111';
 const B = '22222222-2222-4222-8222-222222222222';
+const cleanDir = (directory) => rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+
 test('native geometry checks the visible host when hidden pages share its UUID', async () => {
   const source = await readFile(new URL('../scripts/verify-client.mjs', import.meta.url), 'utf8');
   const start = source.indexOf('const inspectExpression = ');
@@ -54,7 +56,7 @@ const snapshot = (total, input = 100, cached = 80) => ({ total_token_usage: {
   total_tokens: total, input_tokens: input, cached_input_tokens: cached,
   output_tokens: 20, reasoning_output_tokens: 10,
 } });
-const header = (id) => JSON.stringify({ type: 'session_meta', payload: { id } }) + '\n';
+const header = (id, extra = {}) => JSON.stringify({ type: 'session_meta', payload: { id, ...extra } }) + '\n';
 const event = (time, info) => JSON.stringify({ type: 'event_msg', timestamp: time,
   payload: { type: 'token_count', info } }) + '\n';
 
@@ -115,7 +117,7 @@ test('task timing merges resumed logs, waits for complete append and stays bound
     assert.equal(JSON.stringify(completed).includes('DO_NOT_RETAIN'),false);
     await rm(resume);assert.deepEqual((await store.read(A)).task,{value:completed.value,stale:true});
     assert.equal((await store.read(B)).task.value,null);
-  }finally{await rm(directory,{recursive:true,force:true});}
+  }finally{await cleanDir(directory);}
 });
 
 test('cumulative snapshot is authoritative; output and reasoning are not added again', () => {
@@ -148,7 +150,7 @@ test('transient failure retains stale values; successful missing window clears t
   assert.equal(quotaState(old, {}).stale, false);
 });
 
-test('resume files, duplicates, partial append, corrections, and another thread remain distinct', async () => {
+test('resume files, duplicates, partial append, corrections, large headers, and another thread remain distinct', async () => {
   const root = path.resolve('runtime', 'unit');
   await mkdir(root, { recursive: true });
   const directory = await mkdtemp(path.join(root, 'sessions-'));
@@ -156,7 +158,7 @@ test('resume files, duplicates, partial append, corrections, and another thread 
     const first = path.join(directory, 'first.jsonl');
     const resumed = path.join(directory, 'resume.jsonl');
     const record = event('2026-10-10T12:00:00Z', snapshot(120));
-    await writeFile(first, header(A) + record + record);
+    await writeFile(first, header(A, { instructions: 'x'.repeat(100 * 1024) }) + record + record);
     await writeFile(resumed, header(A) + record);
     await writeFile(path.join(directory, 'other.jsonl'), header(B)
       + event('2026-10-10T12:10:00Z', snapshot(999)));
@@ -176,9 +178,15 @@ test('resume files, duplicates, partial append, corrections, and another thread 
     await rm(resumed);
     assert.equal((await store.read(A)).stale, true);
     await writeFile(first, header(B) + event('2026-10-10T12:06:00Z', snapshot(400)));
-    assert.equal((await store.read(A)).value.totalTokens, 300, 'failed replacement retains prior thread data');
-    assert.equal((await store.read(A)).stale, true);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+    const replaced = await store.read(A);
+    assert.equal(replaced.value.totalTokens, 300, 'failed replacement retains prior thread data');
+    assert.equal(replaced.stale, true);
+    assert.equal((await store.read(A)).stale, true, 'absent original UUID cannot borrow replacement data');
+    await writeFile(resumed, header(A) + event('2026-10-10T12:07:00Z', snapshot(500)));
+    const recovered = await store.read(A);
+    assert.equal(recovered.value.totalTokens, 500);
+    assert.equal(recovered.stale, false, 'healthy original UUID resumes without a forced read');
+  } finally { await cleanDir(directory); }
 });
 
 test('CDP endpoint accepts loopback only and rejects credential-bearing URLs', () => {
@@ -214,7 +222,7 @@ test('mode maps exact local metadata, conflicts stay unknown and session failure
     await writeFile(file, make(A,'codex_work_desktop'));
     await writeFile(path.join(directory,'conflict.jsonl'),make(A,'Codex Desktop'));
     assert.equal((await store.read(A,true)).mode.value,null);
-  } finally { await rm(directory,{recursive:true,force:true}); }
+  } finally { await cleanDir(directory); }
 });
 
 test('desktop bridge calls only quota read and does not export account or credential fields', async () => {

@@ -35,18 +35,18 @@ async function handle(message) {
       ? params.protocolVersion : '2025-11-25', capabilities: { tools: {}, resources: {},
         extensions: { 'io.modelcontextprotocol/ui': { mimeTypes: [mimeType] } } },
       serverInfo: { name: 'session-status', version: '0.2.0' },
-      instructions: 'Read-only five-field local conversation status. Use executor thread metadata; never substitute the latest log or anonymized openai/session. Unknown values stay unknown.' }); return;
+      instructions: 'Read-only six-field local conversation status. Use executor thread metadata; never substitute the latest log or anonymized openai/session. Unknown values stay unknown.' }); return;
   }
   if (!initialized) { failure(id, -32000, 'Initialize first'); return; }
   if (method === 'ping') { response(id, {}); return; }
   if (method === 'tools/list') {
     const tool = { name: 'show_session_status', title: '会话状态',
-      description: 'Show current conversation total tokens, cached-input hit rate, codex 300-minute remaining quota, local reset time, and verified Codex/Work mode. Read only.',
+      description: 'Show current conversation total tokens, cached-input hit rate, codex 300-minute remaining quota, local reset time, verified Codex/Work mode, and task duration. Read only.',
       inputSchema: schema, annotations };
     if (uiSupported) tool._meta = { ui: { resourceUri: uri, visibility: ['model', 'app'] },
       'openai/ui': { entrypoints: [{ type: 'thread' }] } };
     response(id, { tools: [tool, { name: 'read_session_status', title: '刷新会话状态',
-      description: 'Read the five status fields without creating a new widget.', inputSchema: schema, annotations,
+      description: 'Read the six status fields without creating a new widget.', inputSchema: schema, annotations,
       _meta: { ui: { visibility: ['app'] } } }] }); return;
   }
   if (method === 'resources/list') { response(id, { resources: [{ uri, name: '会话状态', mimeType }] }); return; }

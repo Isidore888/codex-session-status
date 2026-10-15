@@ -1,14 +1,11 @@
 import { DatabaseSync } from 'node:sqlite';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { UUID, readQuota } from './metrics.mjs';
+import { UUID, readQuota, nextQuotaRefresh } from './metrics.mjs';
+import { identifyMode } from './mode.mjs';
 import { SessionStore } from './sessions.mjs';
 
-export function identifyMode(originator) {
-  if (originator === 'codex_work_desktop') return 'Work';
-  if (originator === 'Codex Desktop') return 'Codex';
-  return null;
-}
+export { identifyMode };
 
 // These keys are accepted by the installed official codex-app-tools MCP adapter.
 export function bindSession(args = {}, meta = {}) {
@@ -33,7 +30,7 @@ export function bindSession(args = {}, meta = {}) {
 export function readThreadContext(databasePath, sessionId) {
   let db;
   try {
-    db = new DatabaseSync(databasePath, { readOnly: true });
+    db = new DatabaseSync(databasePath, { readOnly: true, timeout: 1000 });
     const row = db.prepare('SELECT id, originator FROM threads WHERE id = ? LIMIT 1').get(sessionId);
     if (!row) return { mode: null, stale: false, knownSession: false };
     return { mode: identifyMode(row.originator), stale: false, knownSession: true };
@@ -49,26 +46,29 @@ export class StatusService {
     this.quotaReader = quotaReader;
     this.clock = clock;
     this.quota = { value: null, stale: false, updatedAt: null, source: 'unavailable' };
-    this.quotaAttemptedAt = null;
+    this.quotaSchedule = { failures: 0, nextAttemptAt: 0 };
     this.quotaTask = null;
     this.sessionTasks = new Map();
   }
   async readQuota(sessionId, mode) {
     const now = this.clock();
-    if (this.quotaAttemptedAt !== null && now - this.quotaAttemptedAt < 60000) {
-      return this.quotaTask ?? this.quotaView();
+    if (this.quotaTask) return this.quotaTask;
+    if (now < this.quotaSchedule.nextAttemptAt) {
+      return this.quotaView();
     }
-    this.quotaAttemptedAt = now;
     this.quotaTask = (async () => {
       try {
         if (!this.quotaReader) throw new Error('quota-channel-unavailable');
         const result = await this.quotaReader(sessionId, mode);
-        this.quota = { value: readQuota(result), stale: false, updatedAt: this.clock(), source: 'desktop-api' };
+        const finishedAt = this.clock();
+        this.quota = { value: readQuota(result), stale: false, updatedAt: finishedAt, source: 'desktop-api' };
+        this.quotaSchedule = nextQuotaRefresh(this.quotaSchedule, finishedAt, true);
       } catch {
+        const failedAt = this.clock();
         if (!this.quota.value) {
           try {
             const seed = JSON.parse(await readFile(path.join(this.dataDirectory, 'quota.json'), 'utf8'));
-            const age = this.clock() - seed.updatedAt;
+            const age = failedAt - seed.updatedAt;
             const value = seed.value;
             if (seed.source === 'desktop-api' && Number.isSafeInteger(seed.updatedAt) && age >= 0
               && value && (value.remainingPercent === null || (Number.isFinite(value.remainingPercent)
@@ -80,6 +80,7 @@ export class StatusService {
           } catch { /* No quota credentials, alternate period or guessed value. */ }
         }
         this.quota.stale = true;
+        this.quotaSchedule = nextQuotaRefresh(this.quotaSchedule, failedAt, false);
       }
       return this.quotaView();
     })().finally(() => { this.quotaTask = null; });
@@ -101,6 +102,9 @@ export class StatusService {
       this.sessionTasks.set(binding.sessionId, task);
     }
     const [session, quota] = await Promise.all([task, this.readQuota(binding.sessionId, context.mode)]);
-    return { binding, session, quota, mode: { value: context.mode, stale: context.stale } };
+    const modeValue = context.mode ?? session.mode?.value ?? null;
+    const modeStale = context.mode != null ? context.stale
+      : (session.mode?.value != null ? Boolean(session.mode.stale) : context.stale);
+    return { binding, session, quota, mode: { value: modeValue, stale: modeStale } };
   }
 }

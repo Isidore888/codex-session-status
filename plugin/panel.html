@@ -22,6 +22,7 @@ dd{margin:2px 0 0;font-size:15px;font-variant-numeric:tabular-nums;overflow-wrap
 <div class="metric"><dt>5 小时剩余</dt><dd id="remaining">--</dd></div>
 <div class="metric"><dt>重置时间</dt><dd id="reset">--</dd></div>
 <div class="metric"><dt>当前模式</dt><dd id="mode">未知</dd></div>
+<div class="metric"><dt>任务耗时</dt><dd id="duration">--</dd></div>
 </dl><span class="sr-only" role="status" aria-atomic="true" id="announcement"></span>
 <script>
 (() => {
@@ -35,6 +36,11 @@ dd{margin:2px 0 0;font-size:15px;font-variant-numeric:tabular-nums;overflow-wrap
     const id=nextId++, timeout=setTimeout(()=>{pending.delete(id);reject(new Error('host-timeout'))},5000);
     pending.set(id,{resolve,reject,timeout});send({id,method,params});
   })}
+  function durationText(milliseconds){
+    if(milliseconds==null||!Number.isFinite(milliseconds)||milliseconds<0)return '--';
+    const seconds=Math.floor(milliseconds/1000),hours=Math.floor(seconds/3600),minutes=Math.floor(seconds/60)%60;
+    return (hours?hours+':':'')+String(minutes).padStart(2,'0')+':'+String(seconds%60).padStart(2,'0');
+  }
   function theme(context){
     if(context?.theme==='light'||context?.theme==='dark')document.documentElement.dataset.theme=context.theme;
     const variables=context?.styles?.variables||{};
@@ -43,18 +49,20 @@ dd{margin:2px 0 0;font-size:15px;font-variant-numeric:tabular-nums;overflow-wrap
     }
   }
   function render(){
-    const usage=data?.session?.value, quota=data?.quota?.value, mode=data?.mode?.value;
+    const usage=data?.session?.value, quota=data?.quota?.value, mode=data?.mode?.value, task=data?.session?.task?.value;
     const count=Number.isSafeInteger(usage?.totalTokens)&&usage.totalTokens>=0;
     const cache=Number.isFinite(usage?.cacheHitPercent)&&usage.cacheHitPercent>=0&&usage.cacheHitPercent<=100;
     const remaining=Number.isFinite(quota?.remainingPercent)&&quota.remainingPercent>=0&&quota.remainingPercent<=100;
     const reset=Number.isSafeInteger(quota?.resetsAt)&&quota.resetsAt>0?new Date(quota.resetsAt*1000):null;
+    const elapsed=task?(Number.isSafeInteger(task.durationMs)&&task.durationMs>=0?task.durationMs:(Number.isFinite(task.startedAt)?Math.max(0,Date.now()-task.startedAt):null)):null;
     const values={tokens:count?new Intl.NumberFormat().format(usage.totalTokens):'--',cache:cache?usage.cacheHitPercent.toFixed(1)+'%':'--',
       remaining:remaining?Number(quota.remainingPercent.toFixed(1))+'%':'--',
       reset:reset&&Number.isFinite(reset.getTime())?new Intl.DateTimeFormat(undefined,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(reset):'--',
-      mode:mode==='Work'||mode==='Codex'?mode:'未知'};
+      mode:mode==='Work'||mode==='Codex'?mode:'未知',
+      duration:durationText(elapsed)};
     for(const [key,value] of Object.entries(values)){
       const cell=document.getElementById(key);cell.textContent=value;
-      const stale=requestFailed||(key==='tokens'||key==='cache'?data?.session?.stale:key==='mode'?data?.mode?.stale:data?.quota?.stale);
+      const stale=requestFailed||(key==='tokens'||key==='cache'?data?.session?.stale:key==='duration'?data?.session?.task?.stale:key==='mode'?data?.mode?.stale:data?.quota?.stale);
       cell.classList.toggle('stale',!!stale);
       const timestamp=data?.quota?.updatedAt;
       cell.title=key==='mode'?'根据本地会话 originator 确认；缺失时不猜测':
@@ -65,7 +73,7 @@ dd{margin:2px 0 0;font-size:15px;font-variant-numeric:tabular-nums;overflow-wrap
     const next=typeof id==='string'&&uuid.test(id)?id.toLowerCase():null;
     if(next===sessionId)return;
     sessionId=next;generation++;requestFailed=false;
-    data={binding:{sessionId},session:{value:null,stale:false},mode:{value:null,stale:false},quota:data?.quota||{value:null,stale:false}};
+    data={binding:{sessionId},session:{value:null,stale:false,task:{value:null,stale:false}},mode:{value:null,stale:false},quota:data?.quota||{value:null,stale:false}};
     render();
   }
   function accept(result,allowHostRebind=false){
